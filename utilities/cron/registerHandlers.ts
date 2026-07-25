@@ -8,5 +8,15 @@ export function registerSwissOutreachCronHandlers(): void {
             await retryStuckSwissOutreachCampaigns();
         },
         version: "1",
+        defaultJob: {
+            name: "Swiss outreach retry stuck campaigns",
+            type: "cron",
+            cronExpression: "0 */15 * * * *",
+            timezone: "UTC",
+            singleton: true,
+            executionStrategy: "distributed",
+            scope: "global",
+            priority: 12,
+        },
     });
 }

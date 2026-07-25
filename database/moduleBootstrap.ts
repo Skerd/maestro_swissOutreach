@@ -20,3 +20,8 @@ export async function dropSwissOutreachCollections(): Promise<void> {
         }
     }
 }
+
+export const moduleBootstrap = {
+    models: swissOutreachModels,
+    dropModuleCollections: dropSwissOutreachCollections,
+};
