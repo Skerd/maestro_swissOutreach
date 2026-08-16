@@ -20,21 +20,21 @@ export const campaignSheetView: ViewConfig = {
                     props: {columns: 2},
                     children: [
                         {
-                            render: "#SmallInfoCard",
+                            render: "#DisplayCard",
                             permissions: {read: "status"},
                             field: {
                                 name: "status",
-                                widget: "#SmallInfoCard",
+                                widget: "#DisplayCard",
                                 label: "status",
                                 widgetProps: {icon: "#Tag"},
                             },
                         },
                         {
-                            render: "#SmallInfoCard",
+                            render: "#DisplayCard",
                             permissions: {read: "language"},
                             field: {
                                 name: "language",
-                                widget: "#SmallInfoCard",
+                                widget: "#DisplayCard",
                                 label: "language",
                                 widgetProps: {icon: "#Globe"},
                             },
