@@ -16,7 +16,16 @@ const PipelineRunLogSchema = new Schema<IPipelineRunLog>(
     {
         campaignId: {type: SchemaTypes.ObjectId, ref: "SwissOutreachCampaign", required: true, index: true},
         step: {type: SchemaTypes.String, required: true},
-        level: {type: SchemaTypes.String, enum: pipelineLogLevelValues, default: "info"},
+        level: {type: SchemaTypes.String, enum: pipelineLogLevelValues, default: "info",
+            dynamicTableConfiguration: {
+                enumTones: {
+                    debug:   "neutral",
+                    info:    "info",
+                    warn:    "warning",
+                    error:   "danger",
+                },
+            },
+        },
         message: {type: SchemaTypes.String, required: true},
         meta: {type: SchemaTypes.Mixed, required: false},
     },
