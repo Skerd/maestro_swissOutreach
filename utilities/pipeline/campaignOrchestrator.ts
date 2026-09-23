@@ -22,7 +22,6 @@ import {
 import {preferContactEmail} from "@swissOutreachModule/utilities/adapters/contactExtractor";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 import {createSwissOutreachPorts} from "@swissOutreachModule/utilities/adapters/createPorts";
-import {mapWithConcurrency} from "@swissOutreachModule/utilities/pipeline/concurrency";
 import {incrementMetric} from "@swissOutreachModule/utilities/monitoring/metrics";
 import {publishSwissOutreachPipelineEvent} from "@swissOutreachModule/kafka/kafkaProducer";
 import {
@@ -32,13 +31,15 @@ import {
     getCampaignAbortSignal,
     throwIfCancelled,
 } from "@swissOutreachModule/utilities/pipeline/cancellation";
+import {ICompany} from "@coreModule/database/schemas/company/company";
+import {mapWithConcurrency} from "@coreModule/utilities/helpers/mapWithConcurrency";
 
 const logger = getLogger("swissOutreach.orchestrator");
 
 const running = new Set<string>();
 
 async function logStep(
-    companyId: Types.ObjectId | string,
+    companyId: Types.ObjectId | string | ICompany,
     campaignId: Types.ObjectId | string,
     step: string,
     message: string,
