@@ -60,7 +60,7 @@ router.post(
     validateFormZod(emailIdSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, emailId} = params;
-        const email = await OutreachEmail.findOne({_id: emailId, company: company._id, deletedAt: null});
+        const email = await OutreachEmail.findOne({_id: emailId, company: company._id}).noDeleted();
         if (!email) throw apiValidationException("email_not_found", "emailId", null, languageCode);
         if (!email.toEmail) throw apiValidationException("email_missing_recipient", "toEmail", null, languageCode);
         const wasAlreadyApproved = email.status === "approved" || email.status === "sent" || email.status === "queued";
@@ -81,7 +81,7 @@ router.post(
     validateFormZod(emailIdSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, emailId} = params;
-        const email = await OutreachEmail.findOne({_id: emailId, company: company._id, deletedAt: null});
+        const email = await OutreachEmail.findOne({_id: emailId, company: company._id}).noDeleted();
         if (!email) throw apiValidationException("email_not_found", "emailId", null, languageCode);
         email.status = "skipped";
         await email.save();
@@ -97,7 +97,7 @@ router.post(
     validateFormZod(editBodySchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, emailId, subject, body} = params;
-        const email = await OutreachEmail.findOne({_id: emailId, company: company._id, deletedAt: null});
+        const email = await OutreachEmail.findOne({_id: emailId, company: company._id}).noDeleted();
         if (!email) throw apiValidationException("email_not_found", "emailId", null, languageCode);
         if (subject) email.subject = subject;
         if (body) email.body = body;

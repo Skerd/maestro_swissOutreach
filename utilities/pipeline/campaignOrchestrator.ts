@@ -97,9 +97,9 @@ export class CampaignOrchestrator {
         running.delete(campaignId);
         // Un-claim in-flight sends so they are not stranded as queued.
         await OutreachEmail.updateMany(
-            {campaignId, deletedAt: null, status: "queued"},
+            {campaignId, status: "queued"},
             {$set: {status: "approved"}},
-        );
+        ).noDeleted();
         if (campaign) {
             await logStep(campaign.company, campaignId, "cancel", "Campaign cancelled by user", "warn");
         }
@@ -282,8 +282,7 @@ export class CampaignOrchestrator {
         const foundCount = await ProspectCompany.countDocuments({
             company: campaign.company,
             campaignId: campaign._id,
-            deletedAt: null,
-        });
+        }).noDeleted();
         incrementMetric("companiesDiscovered", foundCount);
         await Campaign.updateOne(
             {_id: campaign._id, status: {$ne: "cancelled"}},
@@ -304,8 +303,7 @@ export class CampaignOrchestrator {
         const prospects = await ProspectCompany.find({
             company: campaign.company,
             campaignId: campaign._id,
-            deletedAt: null,
-        });
+        }).noDeleted();
 
         let enriched = 0;
         let scored = 0;
@@ -400,9 +398,8 @@ export class CampaignOrchestrator {
         const prospects = await ProspectCompany.find({
             company: campaign.company,
             campaignId: campaign._id,
-            deletedAt: null,
             status: {$in: ["scored", "crawled", "website_found"]},
-        }).sort({score: -1});
+        }).noDeleted().sort({score: -1});
 
         for (const prospect of prospects) {
             await throwIfCancelled(campaign._id.toString(), signal);
@@ -410,8 +407,7 @@ export class CampaignOrchestrator {
                 company: campaign.company,
                 campaignId: campaign._id,
                 prospectCompanyId: prospect._id,
-                deletedAt: null,
-            }).select("status");
+            }).noDeleted().select("status");
             // Preserve human edits and anything already in the send pipeline.
             if (existing && !["draft"].includes(existing.status)) {
                 continue;
@@ -482,14 +478,12 @@ export class CampaignOrchestrator {
                 ? {
                       company: campaign.company,
                       campaignId: campaign._id,
-                      deletedAt: null,
                       status: {$in: ["approved", "draft"]},
                       toEmail: {$type: "string"},
                   }
                 : {
                       company: campaign.company,
                       campaignId: campaign._id,
-                      deletedAt: null,
                       status: "approved",
                       toEmail: {$type: "string"},
                   };
@@ -498,7 +492,7 @@ export class CampaignOrchestrator {
                 claimFilter,
                 {$set: {status: "queued"}, $inc: {attempts: 1}},
                 {new: true},
-            );
+            ).noDeleted();
             if (!email) break;
 
             let success = false;

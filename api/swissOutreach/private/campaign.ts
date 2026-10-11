@@ -71,7 +71,7 @@ router.post(
     validateFormZod(idSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         campaignOrchestrator.enqueue(campaign._id.toString(), company._id.toString());
         return {data: campaignToDTO(campaign)};
@@ -85,7 +85,7 @@ router.post(
     validateFormZod(idSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         await campaignOrchestrator.cancel(campaign._id.toString());
         const refreshed = await Campaign.findById(campaign._id);
@@ -100,18 +100,17 @@ router.post(
     validateFormZod(idSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         await OutreachEmail.updateMany(
             {
                 company: company._id,
                 campaignId: campaign._id,
-                deletedAt: null,
                 status: {$in: ["draft", "edited"]},
                 toEmail: {$type: "string"},
             },
             {$set: {status: "approved"}},
-        );
+        ).noDeleted();
         campaign.stats.approved = await OutreachEmail.countDocuments({
             company: company._id,
             campaignId: campaign._id,
@@ -129,7 +128,7 @@ router.post(
     validateFormZod(idSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const result = await campaignOrchestrator.sendApproved(campaign._id.toString(), false);
         const refreshed = await Campaign.findById(campaign._id);
@@ -144,13 +143,12 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const prospects = await ProspectCompany.find({
             company: company._id,
             campaignId: campaign._id,
-            deletedAt: null,
-        }).sort({score: -1});
+        }).noDeleted().sort({score: -1});
         return {data: prospectCompaniesToDTO(prospects)};
     }),
 );
@@ -162,13 +160,12 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const emails = await OutreachEmail.find({
             company: company._id,
             campaignId: campaign._id,
-            deletedAt: null,
-        }).sort({createdAt: -1});
+        }).noDeleted().sort({createdAt: -1});
         return {data: outreachEmailsToDTO(emails)};
     }),
 );
@@ -180,7 +177,7 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id, deletedAt: null});
+        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const logs = await PipelineRunLog.find({
             company: company._id,

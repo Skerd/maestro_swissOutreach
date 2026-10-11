@@ -16,18 +16,17 @@ export async function retryStuckSwissOutreachCampaigns(): Promise<void> {
     const cutoff = new Date(Date.now() - STUCK_MS);
 
     const reclaimed = await OutreachEmail.updateMany(
-        {deletedAt: null, status: "queued", updatedAt: {$lt: cutoff}},
+        { status: "queued", updatedAt: {$lt: cutoff}},
         {$set: {status: "approved"}},
-    );
+    ).noDeleted();
     if (reclaimed.modifiedCount > 0) {
         logger.info(`Reclaimed ${reclaimed.modifiedCount} stuck queued emails back to approved`);
     }
 
     const stuck = await Campaign.find({
-        deletedAt: null,
         status: {$in: ["parsing", "searching", "enriching", "scoring"]},
         updatedAt: {$lt: cutoff},
-    }).limit(20);
+    }).noDeleted().limit(20);
 
     for (const campaign of stuck) {
         logger.info(`Re-enqueue stuck campaign ${campaign._id} status=${campaign.status}`);

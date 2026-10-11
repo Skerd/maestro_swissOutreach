@@ -22,10 +22,9 @@ router.get(
 
         const [campaignsTotal, campaignsActive, companiesFound, emailsSent, failures, scoreAgg, contacted] =
             await Promise.all([
-                Campaign.countDocuments({company: companyId, deletedAt: null}),
+                Campaign.countDocuments({company: companyId}).noDeleted(),
                 Campaign.countDocuments({
                     company: companyId,
-                    deletedAt: null,
                     status: {
                         $in: [
                             "parsing",
@@ -36,19 +35,18 @@ router.get(
                             "sending",
                         ],
                     },
-                }),
-                ProspectCompany.countDocuments({company: companyId, deletedAt: null}),
-                OutreachEmail.countDocuments({company: companyId, deletedAt: null, status: "sent"}),
-                OutreachEmail.countDocuments({company: companyId, deletedAt: null, status: "failed"}),
+                }).noDeleted(),
+                ProspectCompany.countDocuments({company: companyId}).noDeleted(),
+                OutreachEmail.countDocuments({company: companyId, status: "sent"}).noDeleted(),
+                OutreachEmail.countDocuments({company: companyId, status: "failed"}).noDeleted(),
                 ProspectCompany.aggregate([
                     {$match: {company: companyId, deletedAt: null, score: {$type: "number"}}},
                     {$group: {_id: null, avg: {$avg: "$score"}}},
                 ]),
                 ProspectCompany.countDocuments({
                     company: companyId,
-                    deletedAt: null,
                     status: {$in: ["approved", "sent"]},
-                }),
+                }).noDeleted(),
             ]);
 
         const totalAttempts = emailsSent + failures;
