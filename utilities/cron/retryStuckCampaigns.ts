@@ -3,6 +3,7 @@
  * (avoids double-send); only re-enqueues discovery stages.
  * Also reclaims emails left in `queued` after a crash (safe: claim is atomic).
  */
+import type {ObjectId} from "mongodb";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
@@ -12,11 +13,11 @@ const logger = getLogger("swissOutreach.cron");
 
 const STUCK_MS = 15 * 60 * 1000;
 
-export async function retryStuckSwissOutreachCampaigns(): Promise<void> {
+export async function retryStuckSwissOutreachCampaigns(company: ObjectId): Promise<void> {
     const cutoff = new Date(Date.now() - STUCK_MS);
 
     const reclaimed = await OutreachEmail.updateMany(
-        { status: "queued", updatedAt: {$lt: cutoff}},
+        {company, status: "queued", updatedAt: {$lt: cutoff}},
         {$set: {status: "approved"}},
     ).noDeleted();
     if (reclaimed.modifiedCount > 0) {
@@ -24,6 +25,7 @@ export async function retryStuckSwissOutreachCampaigns(): Promise<void> {
     }
 
     const stuck = await Campaign.find({
+        company,
         status: {$in: ["parsing", "searching", "enriching", "scoring"]},
         updatedAt: {$lt: cutoff},
     }).noDeleted().limit(20);

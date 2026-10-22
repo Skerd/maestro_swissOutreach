@@ -4,10 +4,9 @@ import {retryStuckSwissOutreachCampaigns} from "@swissOutreachModule/utilities/c
 export function registerSwissOutreachCronHandlers(): void {
     registerCronHandler({
         code: "swissOutreach.retryStuckCampaigns",
-        handler: async () => {
-            await retryStuckSwissOutreachCampaigns();
+        handler: async (ctx) => {
+            await retryStuckSwissOutreachCampaigns(ctx.company);
         },
-        version: "1",
         defaultJob: {
             name: "Swiss outreach retry stuck campaigns",
             cronExpression: "0 */15 * * * *",
