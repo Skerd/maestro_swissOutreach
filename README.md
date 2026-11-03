@@ -38,7 +38,7 @@ swissOutreach/
 │   ├── mappers/                   # Document → DTO / select
 │   ├── cron/                      # retryStuckCampaigns handler
 │   └── config.ts                  # Env-backed limits and providers
-└── __tests__/                     # Unit + integration + e2e
+└── _tests/                        # Unit + integration + e2e
 ```
 
 ## API routes
@@ -121,9 +121,9 @@ Registered via `database/moduleBootstrap.ts`. Each resource folder follows the c
 
 ```bash
 cd maestro
-npm test -- modules/swissOutreach/__tests__/scoring.extractor.test.ts
-npm test -- modules/swissOutreach/__tests__/orchestrator.integration.test.ts
-npm test -- modules/swissOutreach/__tests__/e2e.pipeline.test.ts
+npm test -- modules/swissOutreach/_tests/scoring.extractor.test.ts
+npm test -- modules/swissOutreach/_tests/orchestrator.integration.test.ts
+npm test -- modules/swissOutreach/_tests/e2e.pipeline.test.ts
 ```
 
 Also covered: URL safety, ZEFIX fixtures, cancel/send, reliability helpers.
