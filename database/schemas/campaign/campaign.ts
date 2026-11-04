@@ -60,13 +60,13 @@ const CampaignSchema = new Schema<ICampaign>(
         jobDescription: {
             type: SchemaTypes.String,
             required: true,
-            dynamicTableConfiguration: {filterable: true, sortable: false, cellType: COLUMN_TYPE.TEXT},
+            dynamicTableConfiguration: {filterable: true, sortable: false, cellType: COLUMN_TYPE.STRING},
         },
         country: {
             type: SchemaTypes.String,
             required: true,
             trim: true,
-            dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.TEXT},
+            dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.STRING},
         },
         cantons: {type: [SchemaTypes.String], default: []},
         maxCompanies: {
