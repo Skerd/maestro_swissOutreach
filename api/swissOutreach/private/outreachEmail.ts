@@ -18,7 +18,7 @@ import authMW from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {validateFormZod} from "@coreModule/utilities/middlewares/validateFormZod";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
-import {isObjectIdZod, notEmptyZod} from "armonia/src/modules/core/helpers/zodBuilder";
+import {isObjectIdZod, stringMinMaxLengthZod} from "armonia/src/modules/core/helpers/zodBuilder";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
 
 const {router: crudRouter} = createCrudRouter({
@@ -45,11 +45,11 @@ function emailIdSchema(languageCode: string, form: any = null) {
     });
 }
 
-function editBodySchema(languageCode: string, form: any = null) {
+export function editBodySchema(languageCode: string, form: any = null) {
     return z.object({
         emailId: isObjectIdZod(form?.["emailIdLabel"] ?? "emailId", languageCode),
-        subject: notEmptyZod(form?.["subjectLabel"] ?? "subject", languageCode).max(300).optional(),
-        body: notEmptyZod(form?.["bodyLabel"] ?? "body", languageCode).max(20000).optional(),
+        subject: stringMinMaxLengthZod(form?.["subjectLabel"] ?? "subject", 1, 300, languageCode).optional(),
+        body: stringMinMaxLengthZod(form?.["bodyLabel"] ?? "body", 1, 20000, languageCode).optional(),
     });
 }
 
