@@ -3,6 +3,7 @@ import ownershipPlugin from "@coreModule/database/plugins/ownershipPlugin";
 import lifeCyclePlugin from "@coreModule/database/plugins/lifeCyclePlugin";
 import {ILifeCyclePluginFields, IOwnershipPluginFields} from "@coreModule/database/types/plugin-fields";
 import {pipelineLogLevelValues} from "armonia/src/modules/swissOutreach/types/constants";
+import softDeletePlugin from "@coreModule/database/plugins/softDeletePlugin";
 
 export interface IPipelineRunLog extends Document, IOwnershipPluginFields, ILifeCyclePluginFields {
     campaignId: Types.ObjectId;
@@ -33,6 +34,7 @@ const PipelineRunLogSchema = new Schema<IPipelineRunLog>(
 );
 
 ownershipPlugin(PipelineRunLogSchema);
+softDeletePlugin(PipelineRunLogSchema);
 lifeCyclePlugin(PipelineRunLogSchema);
 PipelineRunLogSchema.index({company: 1, campaignId: 1, createdAt: -1});
 

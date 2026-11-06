@@ -1,4 +1,5 @@
 import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
+import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 
 const abortControllers = new Map<string, AbortController>();
 
@@ -26,7 +27,7 @@ export function clearCampaignAbort(campaignId: string): void {
 }
 
 export async function isCampaignCancelled(campaignId: string): Promise<boolean> {
-    const campaign = await Campaign.findById(campaignId).select("status").lean();
+    const campaign = await campaignService.findByIdLean(campaignId, "status");
     return campaign?.status === "cancelled";
 }
 

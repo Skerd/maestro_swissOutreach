@@ -2,9 +2,9 @@ import {Router} from "express";
 import authMW from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
-import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
-import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
-import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
+import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
+import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
+import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
 import type {SwissOutreachDashboardSummary} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/dashboard/dashboard.dto";
 import {getSwissOutreachMetrics} from "@swissOutreachModule/utilities/monitoring/metrics";
 import {MAIL_PROVIDER_PRESETS, resolveMailProviderKind} from "@swissOutreachModule/utilities/adapters/mailProviderFactory";
@@ -22,8 +22,8 @@ router.get(
 
         const [campaignsTotal, campaignsActive, companiesFound, emailsSent, failures, scoreAgg, contacted] =
             await Promise.all([
-                Campaign.countDocuments({company: companyId}).noDeleted(),
-                Campaign.countDocuments({
+                campaignService.count({company: companyId}, {withDeleted: false}),
+                campaignService.count({
                     company: companyId,
                     status: {
                         $in: [
@@ -35,18 +35,18 @@ router.get(
                             "sending",
                         ],
                     },
-                }).noDeleted(),
-                ProspectCompany.countDocuments({company: companyId}).noDeleted(),
-                OutreachEmail.countDocuments({company: companyId, status: "sent"}).noDeleted(),
-                OutreachEmail.countDocuments({company: companyId, status: "failed"}).noDeleted(),
-                ProspectCompany.aggregate([
+                }, {withDeleted: false}),
+                prospectCompanyService.count({company: companyId}, {withDeleted: false}),
+                outreachEmailService.count({company: companyId, status: "sent"}, {withDeleted: false}),
+                outreachEmailService.count({company: companyId, status: "failed"}, {withDeleted: false}),
+                prospectCompanyService.aggregate([
                     {$match: {company: companyId, deletedAt: null, score: {$type: "number"}}},
                     {$group: {_id: null, avg: {$avg: "$score"}}},
                 ]),
-                ProspectCompany.countDocuments({
+                prospectCompanyService.count({
                     company: companyId,
                     status: {$in: ["approved", "sent"]},
-                }).noDeleted(),
+                }, {withDeleted: false}),
             ]);
 
         const totalAttempts = emailsSent + failures;

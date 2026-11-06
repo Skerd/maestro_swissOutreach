@@ -1,4 +1,4 @@
-import {KAFKA} from "@coreModule/environment";
+import {SWISS_OUTREACH_KAFKA} from "@swissOutreachModule/environment";
 import {publishEvent} from "@coreModule/kafka/kafkaProducer";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import type {SwissOutreachPipelineEvent} from "@swissOutreachModule/kafka/types";
@@ -16,5 +16,5 @@ export function publishSwissOutreachPipelineEvent(
         timestamp: params.timestamp ?? Date.now(),
     };
 
-    return publishEvent(KAFKA.TOPICS.SWISS_OUTREACH_PIPELINE, params.campaignId, event, logger);
+    return publishEvent(SWISS_OUTREACH_KAFKA.TOPIC, params.campaignId, event, logger);
 }

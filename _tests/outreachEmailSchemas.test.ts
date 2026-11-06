@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {editBodySchema} from "@swissOutreachModule/api/swissOutreach/private/outreachEmail";
+import {editOutreachEmailDraftFormSchema as editBodySchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/outreachEmail/outreachEmailAction.form.validator";
 
 // TD-B22: `.max()` chained on `notEmptyZod` threw while building the schema, so `/editDraft` answered 500 on every call.
 describe("outreach email /editDraft schema", () => {

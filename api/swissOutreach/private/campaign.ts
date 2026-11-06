@@ -1,5 +1,4 @@
 import {Router} from "express";
-import {z} from "zod";
 import {buildCreateDataFromSchemaDef, buildUpdateDataFromSchemaDef} from "@coreModule/api/buildUpdateDataFromSchemaDef";
 import {createCrudRouter} from "@coreModule/api/crudRouterFactory";
 import {createCampaignFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/createCampaign.form.validator";
@@ -13,16 +12,17 @@ import {
 } from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.dto";
 import {campaignsToSelect} from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.select";
 import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
-import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
-import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
-import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
+import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
+import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
+import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog.service";
 import {prospectCompaniesToDTO} from "@swissOutreachModule/utilities/mappers/prospectCompany/prospectCompanyMapper.dto";
 import {outreachEmailsToDTO} from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.dto";
 import authMW from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {validateFormZod} from "@coreModule/utilities/middlewares/validateFormZod";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
-import {isObjectIdZod} from "armonia/src/modules/core/helpers/zodBuilder";
+import {transactionHandler} from "@coreModule/utilities/middlewares/transactionUtils";
+import {campaignIdFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaignAction.form.validator";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
@@ -36,6 +36,8 @@ const {router: crudRouter} = createCrudRouter({
     toDTO: campaignToDTO,
     toDTOArray: campaignsToDTO,
     toSelect: campaignsToSelect,
+    selectSearchField: "senderCompanyName",
+    selectProjection: "_id senderCompanyName status",
     defaultSort: {createdAt: -1},
     buildCreateData: (body: any) => {
         const config = getSwissOutreachConfig();
@@ -58,20 +60,14 @@ const {router: crudRouter} = createCrudRouter({
 export const router = Router();
 router.use(crudRouter);
 
-function idSchema(languageCode: string, form: any = null) {
-    return z.object({
-        campaignId: isObjectIdZod(form?.["campaignIdLabel"] ?? "campaignId", languageCode),
-    });
-}
-
 router.post(
     "/start",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 30}),
-    validateFormZod(idSchema),
+    validateFormZod(campaignIdFormSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         campaignOrchestrator.enqueue(campaign._id.toString(), company._id.toString());
         return {data: campaignToDTO(campaign)};
@@ -82,13 +78,13 @@ router.post(
     "/cancel",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 30}),
-    validateFormZod(idSchema),
+    validateFormZod(campaignIdFormSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         await campaignOrchestrator.cancel(campaign._id.toString());
-        const refreshed = await Campaign.findById(campaign._id);
+        const refreshed = await campaignService.findById(campaign._id);
         return {data: campaignToDTO(refreshed!)};
     }),
 );
@@ -97,12 +93,13 @@ router.post(
     "/approveAll",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 20}),
-    validateFormZod(idSchema),
+    transactionHandler(),
+    validateFormZod(campaignIdFormSchema),
     asyncHandler(async (params: any) => {
-        const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const {company, languageCode, campaignId, session} = params;
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode, session});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        await OutreachEmail.updateMany(
+        await outreachEmailService.updateMany(
             {
                 company: company._id,
                 campaignId: campaign._id,
@@ -110,13 +107,14 @@ router.post(
                 toEmail: {$type: "string"},
             },
             {$set: {status: "approved"}},
-        ).noDeleted();
-        campaign.stats.approved = await OutreachEmail.countDocuments({
+            {withDeleted: false, session},
+        );
+        campaign.stats.approved = await outreachEmailService.count({
             company: company._id,
             campaignId: campaign._id,
             status: "approved",
-        });
-        await campaign.save();
+        }, {session});
+        await campaign.save({session});
         return {data: campaignToDTO(campaign)};
     }),
 );
@@ -125,13 +123,13 @@ router.post(
     "/sendApproved",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 10}),
-    validateFormZod(idSchema),
+    validateFormZod(campaignIdFormSchema),
     asyncHandler(async (params: any) => {
         const {company, languageCode, campaignId} = params;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const result = await campaignOrchestrator.sendApproved(campaign._id.toString(), false);
-        const refreshed = await Campaign.findById(campaign._id);
+        const refreshed = await campaignService.findById(campaign._id);
         return {data: {campaign: campaignToDTO(refreshed!), ...result}};
     }),
 );
@@ -143,12 +141,15 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const prospects = await ProspectCompany.find({
-            company: company._id,
-            campaignId: campaign._id,
-        }).noDeleted().sort({score: -1});
+        const prospects = await prospectCompanyService.find(
+            {company: company._id, campaignId: campaign._id},
+            {withDeleted: false},
+            undefined,
+            undefined,
+            {score: -1},
+        );
         return {data: prospectCompaniesToDTO(prospects)};
     }),
 );
@@ -160,12 +161,15 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const emails = await OutreachEmail.find({
-            company: company._id,
-            campaignId: campaign._id,
-        }).noDeleted().sort({createdAt: -1});
+        const emails = await outreachEmailService.find(
+            {company: company._id, campaignId: campaign._id},
+            {withDeleted: false},
+            undefined,
+            undefined,
+            {createdAt: -1},
+        );
         return {data: outreachEmailsToDTO(emails)};
     }),
 );
@@ -177,15 +181,16 @@ router.get(
     asyncHandler(async (params: any, routeParams: any) => {
         const {company, languageCode} = params;
         const campaignId = routeParams.campaignId;
-        const campaign = await Campaign.findOne({_id: campaignId, company: company._id}).noDeleted();
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const logs = await PipelineRunLog.find({
-            company: company._id,
-            campaignId: campaign._id,
-        })
-            .sort({createdAt: -1})
-            .limit(200)
-            .lean();
+        const logs = await pipelineRunLogService.find(
+            {company: company._id, campaignId: campaign._id},
+            {},
+            undefined,
+            undefined,
+            {createdAt: -1},
+            200,
+        );
         return {
             data: logs.map((l: any) => ({
                 _id: l._id.toString(),

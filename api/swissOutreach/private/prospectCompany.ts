@@ -21,6 +21,7 @@ export const {router} = createCrudRouter({
     toDTO: prospectCompanyToDTO,
     toDTOArray: prospectCompaniesToDTO,
     toSelect: prospectCompaniesToSelect,
+    selectSearchField: "companyName",
     defaultSort: {score: -1},
     buildCreateData: buildCreateDataFromSchemaDef(ProspectCompanySchemaDef),
     buildUpdateData: buildUpdateDataFromSchemaDef(ProspectCompanySchemaDef),

@@ -1,4 +1,5 @@
 import {KAFKA} from "@coreModule/environment";
+import {SWISS_OUTREACH_KAFKA} from "@swissOutreachModule/environment";
 import {addKafkaTopicConsumer} from "@coreModule/kafka/kafkaConsumer";
 import {getLogger, serverLogger} from "@coreModule/loggers/serverLog";
 import type {SwissOutreachPipelineEvent} from "@swissOutreachModule/kafka/types";
@@ -33,8 +34,8 @@ export async function startSwissOutreachKafkaConsumers(parentLogger?: serverLogg
         await addKafkaTopicConsumer(parentLogger, {
             registryKey: "swissOutreachPipeline",
             displayName: "Swiss outreach pipeline",
-            groupId: KAFKA.CONSUMER_GROUP.SWISS_OUTREACH_PIPELINE,
-            topic: KAFKA.TOPICS.SWISS_OUTREACH_PIPELINE,
+            groupId: SWISS_OUTREACH_KAFKA.CONSUMER_GROUP,
+            topic: SWISS_OUTREACH_KAFKA.TOPIC,
             expectedEventType: "swiss_outreach_pipeline",
             processEvent: (d) => processPipelineEvent(d as SwissOutreachPipelineEvent),
         });

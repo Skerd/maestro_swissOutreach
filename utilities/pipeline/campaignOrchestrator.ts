@@ -1,9 +1,7 @@
 import {Types} from "mongoose";
 import {getLogger} from "@coreModule/loggers/serverLog";
+import {nestedEntityToRef} from "@coreModule/utilities/mappers/common.mapper";
 import Campaign, {ICampaign} from "@swissOutreachModule/database/schemas/campaign/campaign";
-import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
-import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
-import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
 import type {
     CompanyRegistryPort,
     LlmPort,
@@ -34,6 +32,10 @@ import {
 import {ICompany} from "@coreModule/database/schemas/company/company";
 import {mapWithConcurrency} from "@coreModule/utilities/helpers/mapWithConcurrency";
 
+import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog.service";
+import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
+import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
+import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
 const logger = getLogger("swissOutreach.orchestrator");
 
 const running = new Set<string>();
@@ -49,9 +51,9 @@ async function logStep(
     logger[level === "error" ? "err" : level === "warn" ? "warn" : "info"](
         `[campaign=${campaignId}] ${step}: ${message}`,
     );
-    await PipelineRunLog.create({
-        company: companyId,
-        campaignId,
+    await pipelineRunLogService.create({
+        company: nestedEntityToRef(companyId),
+        campaignId: new Types.ObjectId(String(campaignId)),
         step,
         level,
         message,
@@ -89,17 +91,10 @@ export class CampaignOrchestrator {
 
     async cancel(campaignId: string): Promise<void> {
         abortCampaign(campaignId);
-        const campaign = await Campaign.findByIdAndUpdate(
-            campaignId,
-            {$set: {status: "cancelled"}},
-            {new: true},
-        );
+        const campaign = await campaignService.markCancelled(campaignId);
         running.delete(campaignId);
         // Un-claim in-flight sends so they are not stranded as queued.
-        await OutreachEmail.updateMany(
-            {campaignId, status: "queued"},
-            {$set: {status: "approved"}},
-        ).noDeleted();
+        await outreachEmailService.updateMany({campaignId, status: "queued"}, {$set: {status: "approved"}}, {withDeleted: false});
         if (campaign) {
             await logStep(campaign.company, campaignId, "cancel", "Campaign cancelled by user", "warn");
         }
@@ -110,7 +105,7 @@ export class CampaignOrchestrator {
         incrementMetric("campaignsStarted");
         void (async () => {
             try {
-                const campaign = await Campaign.findById(campaignId).select("company status").lean();
+                const campaign = await campaignService.findByIdLean(campaignId, "company status");
                 if (!campaign || campaign.status === "completed" || campaign.status === "sending") {
                     return;
                 }
@@ -143,17 +138,14 @@ export class CampaignOrchestrator {
         if (running.has(campaignId)) return;
         running.add(campaignId);
         const signal = getCampaignAbortSignal(campaignId);
-        const campaign = await Campaign.findById(campaignId);
+        const campaign = await campaignService.findById(campaignId, {});
         if (!campaign || campaign.deletedAt || campaign.status === "cancelled") {
             running.delete(campaignId);
             return;
         }
         const companyId = campaign.company;
         try {
-            await Campaign.updateOne(
-                {_id: campaign._id, status: {$ne: "cancelled"}},
-                {$set: {status: "parsing", lastError: undefined}},
-            );
+            await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "parsing", lastError: undefined}});
             await logStep(
                 companyId,
                 campaign._id,
@@ -169,29 +161,20 @@ export class CampaignOrchestrator {
             if (await this.isCancelled(campaignId)) return;
 
             if (campaign.sendAutomatically) {
-                await Campaign.updateOne(
-                    {_id: campaign._id, status: {$ne: "cancelled"}},
-                    {$set: {status: "sending"}},
-                );
+                await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "sending"}});
                 await this.sendApproved(campaign._id.toString(), true);
             } else {
-                await Campaign.updateOne(
-                    {_id: campaign._id, status: {$ne: "cancelled"}},
-                    {$set: {status: "awaiting_approval"}},
-                );
+                await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "awaiting_approval"}});
                 await logStep(companyId, campaign._id, "approval", "Awaiting human approval");
             }
         } catch (err: any) {
             if (err instanceof CampaignCancelledError || (await this.isCancelled(campaignId))) {
-                await Campaign.updateOne({_id: campaignId}, {$set: {status: "cancelled"}});
+                await campaignService.updateOne({_id: campaignId}, {$set: {status: "cancelled"}});
                 await logStep(companyId, campaignId, "cancel", "Pipeline stopped after cancel", "warn");
                 return;
             }
             incrementMetric("pipelineErrors");
-            await Campaign.updateOne(
-                {_id: campaignId, status: {$ne: "cancelled"}},
-                {$set: {status: "failed", lastError: err?.message || String(err)}},
-            );
+            await campaignService.updateOne({_id: campaignId, status: {$ne: "cancelled"}}, {$set: {status: "failed", lastError: err?.message || String(err)}});
             await logStep(companyId, campaign._id, "pipeline", err?.message || String(err), "error");
         } finally {
             running.delete(campaignId);
@@ -200,19 +183,16 @@ export class CampaignOrchestrator {
     }
 
     private async isCancelled(campaignId: string): Promise<boolean> {
-        const c = await Campaign.findById(campaignId).select("status").lean();
+        const c = await campaignService.findByIdLean(campaignId, "status");
         return c?.status === "cancelled";
     }
 
     private async parseJob(campaign: ICampaign, signal: AbortSignal): Promise<void> {
         await throwIfCancelled(campaign._id.toString(), signal);
-        await Campaign.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "parsing"}});
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "parsing"}});
         await logStep(campaign.company, campaign._id, "job_parse", "Parsing job description");
         campaign.parsedJob = await this.jobParser.parse(campaign.jobDescription, campaign.language);
-        await Campaign.updateOne(
-            {_id: campaign._id, status: {$ne: "cancelled"}},
-            {$set: {parsedJob: campaign.parsedJob}},
-        );
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {parsedJob: campaign.parsedJob}});
         await logStep(campaign.company, campaign._id, "job_parse", "Job parsed", "info", {
             industry: campaign.parsedJob.industry,
             keywords: campaign.parsedJob.keywords,
@@ -221,7 +201,7 @@ export class CampaignOrchestrator {
 
     private async searchCompanies(campaign: ICampaign, signal: AbortSignal): Promise<void> {
         await throwIfCancelled(campaign._id.toString(), signal);
-        await Campaign.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "searching"}});
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "searching"}});
         const config = getSwissOutreachConfig();
         const keywords = [
             ...(campaign.parsedJob?.keywords || []),
@@ -246,10 +226,9 @@ export class CampaignOrchestrator {
             await throwIfCancelled(campaign._id.toString(), signal);
             const dedupeKey = buildDedupeKey(hit.uid, hit.companyName, hit.canton);
             try {
-                await ProspectCompany.findOneAndUpdate(
+                await prospectCompanyService.insertIfNew(
                     {company: campaign.company, campaignId: campaign._id, dedupeKey},
                     {
-                        $setOnInsert: {
                             company: campaign.company,
                             campaignId: campaign._id,
                             companyName: hit.companyName,
@@ -264,8 +243,6 @@ export class CampaignOrchestrator {
                             languages: [],
                             services: [],
                         },
-                    },
-                    {upsert: true, new: true},
                 );
                 created += 1;
             } catch (err: any) {
@@ -279,15 +256,12 @@ export class CampaignOrchestrator {
             }
         }
 
-        const foundCount = await ProspectCompany.countDocuments({
+        const foundCount = await prospectCompanyService.count({
             company: campaign.company,
             campaignId: campaign._id,
-        }).noDeleted();
+        }, {withDeleted: false});
         incrementMetric("companiesDiscovered", foundCount);
-        await Campaign.updateOne(
-            {_id: campaign._id, status: {$ne: "cancelled"}},
-            {$set: {"stats.found": foundCount}},
-        );
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {"stats.found": foundCount}});
         await logStep(
             campaign.company,
             campaign._id,
@@ -298,12 +272,12 @@ export class CampaignOrchestrator {
 
     private async enrichProspects(campaign: ICampaign, signal: AbortSignal): Promise<void> {
         await throwIfCancelled(campaign._id.toString(), signal);
-        await Campaign.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "enriching"}});
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "enriching"}});
         const config = getSwissOutreachConfig();
-        const prospects = await ProspectCompany.find({
+        const prospects = await prospectCompanyService.find({
             company: campaign.company,
             campaignId: campaign._id,
-        }).noDeleted();
+        }, {withDeleted: false});
 
         let enriched = 0;
         let scored = 0;
@@ -379,35 +353,32 @@ export class CampaignOrchestrator {
             }
         });
 
-        await Campaign.updateOne(
-            {_id: campaign._id, status: {$ne: "cancelled"}},
-            {
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {
                 $set: {
                     status: "scoring",
                     "stats.enriched": enriched,
                     "stats.scored": scored,
                 },
                 $inc: {"stats.failed": failed},
-            },
-        );
+            });
         await logStep(campaign.company, campaign._id, "enrich", `Enriched ${enriched}, scored ${scored}`);
     }
 
     private async prepareEmails(campaign: ICampaign, signal: AbortSignal): Promise<void> {
         await throwIfCancelled(campaign._id.toString(), signal);
-        const prospects = await ProspectCompany.find({
+        const prospects = await prospectCompanyService.find({
             company: campaign.company,
             campaignId: campaign._id,
             status: {$in: ["scored", "crawled", "website_found"]},
-        }).noDeleted().sort({score: -1});
+        }, {withDeleted: false}, undefined, undefined, {score: -1});
 
         for (const prospect of prospects) {
             await throwIfCancelled(campaign._id.toString(), signal);
-            const existing = await OutreachEmail.findOne({
+            const existing = await outreachEmailService.findOne({
                 company: campaign.company,
                 campaignId: campaign._id,
                 prospectCompanyId: prospect._id,
-            }).noDeleted().select("status");
+            }, {withDeleted: false}, undefined, "status");
             // Preserve human edits and anything already in the send pipeline.
             if (existing && !["draft"].includes(existing.status)) {
                 continue;
@@ -429,7 +400,7 @@ export class CampaignOrchestrator {
                 additionalNotes: campaign.additionalNotes,
             });
 
-            await OutreachEmail.findOneAndUpdate(
+            await outreachEmailService.upsertDraft(
                 {
                     company: campaign.company,
                     campaignId: campaign._id,
@@ -450,7 +421,6 @@ export class CampaignOrchestrator {
                         attempts: 0,
                     },
                 },
-                {upsert: true},
             );
         }
         await logStep(campaign.company, campaign._id, "email_generate", `Drafted emails for ${prospects.length} prospects`);
@@ -458,16 +428,13 @@ export class CampaignOrchestrator {
     }
 
     async sendApproved(campaignId: string, autoApproved = false): Promise<{sent: number; failed: number}> {
-        const campaign = await Campaign.findById(campaignId);
+        const campaign = await campaignService.findById(campaignId, {});
         if (!campaign) throw new Error("Campaign not found");
         if (campaign.status === "cancelled") return {sent: 0, failed: 0};
         const config = getSwissOutreachConfig();
         const signal = getCampaignAbortSignal(campaignId);
 
-        await Campaign.updateOne(
-            {_id: campaign._id, status: {$ne: "cancelled"}},
-            {$set: {status: "sending"}},
-        );
+        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "sending"}});
 
         let sent = 0;
         let failed = 0;
@@ -488,11 +455,7 @@ export class CampaignOrchestrator {
                       toEmail: {$type: "string"},
                   };
 
-            const email = await OutreachEmail.findOneAndUpdate(
-                claimFilter,
-                {$set: {status: "queued"}, $inc: {attempts: 1}},
-                {new: true},
-            ).noDeleted();
+            const email = await outreachEmailService.claimNext(claimFilter);
             if (!email) break;
 
             let success = false;
@@ -514,7 +477,7 @@ export class CampaignOrchestrator {
                     email.attempts = attempt;
                     email.lastError = undefined;
                     await email.save();
-                    await ProspectCompany.updateOne({_id: email.prospectCompanyId}, {$set: {status: "sent"}});
+                    await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "sent"}});
                     sent += 1;
                     success = true;
                     incrementMetric("emailsSent");
@@ -530,26 +493,23 @@ export class CampaignOrchestrator {
                 email.lastError = lastError;
                 await email.save();
                 failed += 1;
-                await Campaign.updateOne({_id: campaign._id}, {$inc: {"stats.failed": 1}});
+                await campaignService.updateOne({_id: campaign._id}, {$inc: {"stats.failed": 1}});
                 incrementMetric("emailsFailed");
             }
         }
 
-        const approved = await OutreachEmail.countDocuments({
+        const approved = await outreachEmailService.count({
             campaignId: campaign._id,
             status: {$in: ["approved", "sent", "queued"]},
         });
         if (!(await this.isCancelled(campaignId))) {
-            await Campaign.updateOne(
-                {_id: campaign._id, status: {$ne: "cancelled"}},
-                {
+            await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {
                     $set: {
                         status: failed > 0 && sent === 0 ? "failed" : "completed",
                         "stats.approved": approved,
                     },
                     $inc: {"stats.sent": sent},
-                },
-            );
+                });
         }
         await logStep(campaign.company, campaign._id, "send", `Sent ${sent}, failed ${failed}`);
         return {sent, failed};
