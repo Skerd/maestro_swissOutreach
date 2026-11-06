@@ -49,7 +49,8 @@ const ProspectCompanySchema = new Schema<IProspectCompany>(
             type: SchemaTypes.ObjectId,
             ref: "SwissOutreachCampaign",
             required: true,
-            dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.OBJECT_ID},
+            // Hidden by default: the prospects page is scoped to one picked campaign (TD-F25)
+            dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.OBJECT_ID, visible: false},
         },
         companyName: {
             type: SchemaTypes.String,
