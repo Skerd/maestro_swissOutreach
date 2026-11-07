@@ -45,6 +45,8 @@ swissOutreach/
 
 Routes are discovered from `api/swissOutreach/private/`. Mounted under `/api/swissOutreach/<file>`.
 
+The campaign and email actions (`start`, `cancel`, `approveAll`, `sendApproved`, `approve`, `skip`, `editDraft`) are `@action` methods in `database/schemas/campaign/campaign.actions.ts` and `database/schemas/outreachEmail/outreachEmail.actions.ts`. Each is its own role permission (`swissoutreachcampaigns[action:<name>]`, `swissoutreachemails[action:<name>]`, D86); admin roles get them. Sent or sending emails cannot be skipped or edited (`email_already_sent`); a campaign sends only from `awaiting_approval`/`completed`/`failed` (`campaign_cannot_send`) and cannot start while running, sending, completed or cancelled (`campaign_cannot_start`) (D85).
+
 | Route file | Base path | Notable endpoints |
 |------------|-----------|-------------------|
 | `campaign.ts` | `/api/swissOutreach/campaign` | Standard CRUD; `POST /start`, `/cancel`, `/approveAll`, `/sendApproved`; `GET /:campaignId/prospects`, `/emails`, `/logs` |
@@ -121,12 +123,10 @@ Registered via `database/moduleBootstrap.ts`. Each resource folder follows the c
 
 ```bash
 cd maestro
-npm test -- modules/swissOutreach/_tests/scoring.extractor.test.ts
-npm test -- modules/swissOutreach/_tests/orchestrator.integration.test.ts
-npm test -- modules/swissOutreach/_tests/e2e.pipeline.test.ts
+npx vitest run modules/swissOutreach
 ```
 
-Also covered: URL safety, ZEFIX fixtures, cancel/send, reliability helpers.
+`outreach.scoring` (scoring, job parsing, drafts), `outreach.pipeline` (orchestrator, sending, cron) and `outreach.approval` (HTTP actions, permissions, tenancy, dashboard) use the fake ports in `outreach.fixtures.ts`; no live provider is called.
 
 ## Path alias
 

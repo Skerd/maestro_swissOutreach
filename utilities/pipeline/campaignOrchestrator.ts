@@ -2,6 +2,7 @@ import {Types} from "mongoose";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import {nestedEntityToRef} from "@coreModule/utilities/mappers/common.mapper";
 import Campaign, {ICampaign} from "@swissOutreachModule/database/schemas/campaign/campaign";
+import type {IOutreachEmail} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import type {
     CompanyRegistryPort,
     LlmPort,
@@ -432,69 +433,82 @@ export class CampaignOrchestrator {
         if (!campaign) throw new Error("Campaign not found");
         if (campaign.status === "cancelled") return {sent: 0, failed: 0};
         const config = getSwissOutreachConfig();
+        // Each send gets the whole retry budget; `attempts` counts every try the email ever had.
+        const triesPerSend = Math.max(1, config.retryCount);
         const signal = getCampaignAbortSignal(campaignId);
 
         await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "sending"}});
 
         let sent = 0;
         let failed = 0;
+        let claimed: IOutreachEmail | null = null;
 
-        while (true) {
-            await throwIfCancelled(campaignId, signal);
-            const claimFilter = autoApproved
-                ? {
-                      company: campaign.company,
-                      campaignId: campaign._id,
-                      status: {$in: ["approved", "draft"]},
-                      toEmail: {$type: "string"},
-                  }
-                : {
-                      company: campaign.company,
-                      campaignId: campaign._id,
-                      status: "approved",
-                      toEmail: {$type: "string"},
-                  };
-
-            const email = await outreachEmailService.claimNext(claimFilter);
-            if (!email) break;
-
-            let success = false;
-            let lastError = "";
-            for (let attempt = email.attempts; attempt <= config.retryCount; attempt++) {
+        try {
+            while (true) {
                 await throwIfCancelled(campaignId, signal);
-                try {
-                    const result = await this.deps.mail.send({
-                        companyId: campaign.company.toString(),
-                        to: email.toEmail!,
-                        subject: email.subject,
-                        text: email.body,
-                        fromEmail: campaign.senderEmail,
-                        fromName: campaign.senderName,
-                    });
-                    email.status = "sent";
-                    email.sentAt = new Date();
-                    email.messageId = result.messageId;
-                    email.attempts = attempt;
-                    email.lastError = undefined;
-                    await email.save();
-                    await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "sent"}});
-                    sent += 1;
-                    success = true;
-                    incrementMetric("emailsSent");
-                    break;
-                } catch (err: any) {
-                    lastError = err?.message || String(err);
-                    email.attempts = attempt;
-                    await sleep(config.requestDelayMs * attempt);
+                const claimFilter = autoApproved
+                    ? {
+                          company: campaign.company,
+                          campaignId: campaign._id,
+                          status: {$in: ["approved", "draft"]},
+                          toEmail: {$type: "string"},
+                      }
+                    : {
+                          company: campaign.company,
+                          campaignId: campaign._id,
+                          status: "approved",
+                          toEmail: {$type: "string"},
+                      };
+
+                // Claiming counts the first try.
+                const email: IOutreachEmail | null = await outreachEmailService.claimNext(claimFilter);
+                if (!email) break;
+                claimed = email;
+
+                let success = false;
+                let lastError = "";
+                for (let tryNumber = 1; tryNumber <= triesPerSend; tryNumber++) {
+                    await throwIfCancelled(campaignId, signal);
+                    if (tryNumber > 1) email.attempts += 1;
+                    try {
+                        const result = await this.deps.mail.send({
+                            companyId: campaign.company.toString(),
+                            to: email.toEmail!,
+                            subject: email.subject,
+                            text: email.body,
+                            fromEmail: campaign.senderEmail,
+                            fromName: campaign.senderName,
+                        });
+                        email.status = "sent";
+                        email.sentAt = new Date();
+                        email.messageId = result.messageId;
+                        email.lastError = undefined;
+                        await email.save();
+                        await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "sent"}});
+                        sent += 1;
+                        success = true;
+                        incrementMetric("emailsSent");
+                        break;
+                    } catch (err: any) {
+                        lastError = err?.message || String(err);
+                        await sleep(config.requestDelayMs * tryNumber);
+                    }
                 }
+                if (!success) {
+                    email.status = "failed";
+                    email.lastError = lastError || email.lastError;
+                    await email.save();
+                    failed += 1;
+                    await campaignService.updateOne({_id: campaign._id}, {$inc: {"stats.failed": 1}});
+                    incrementMetric("emailsFailed");
+                }
+                claimed = null;
             }
-            if (!success) {
-                email.status = "failed";
-                email.lastError = lastError;
-                await email.save();
-                failed += 1;
-                await campaignService.updateOne({_id: campaign._id}, {$inc: {"stats.failed": 1}});
-                incrementMetric("emailsFailed");
+        } catch (err) {
+            if (!(err instanceof CampaignCancelledError)) throw err;
+            // Cancelled mid-send: the email in hand goes back to approved, and what was sent is still counted.
+            if (claimed) {
+                await outreachEmailService.updateOne({_id: claimed._id, status: "queued"}, {$set: {status: "approved"}});
             }
         }
 
@@ -502,7 +516,9 @@ export class CampaignOrchestrator {
             campaignId: campaign._id,
             status: {$in: ["approved", "sent", "queued"]},
         });
-        if (!(await this.isCancelled(campaignId))) {
+        if (await this.isCancelled(campaignId)) {
+            await campaignService.updateOne({_id: campaign._id}, {$set: {"stats.approved": approved}, $inc: {"stats.sent": sent}});
+        } else {
             await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {
                     $set: {
                         status: failed > 0 && sent === 0 ? "failed" : "completed",
@@ -513,6 +529,11 @@ export class CampaignOrchestrator {
         }
         await logStep(campaign.company, campaign._id, "send", `Sent ${sent}, failed ${failed}`);
         return {sent, failed};
+    }
+
+    /** Whether this process is running the campaign's pipeline right now. */
+    isRunning(campaignId: string): boolean {
+        return running.has(campaignId);
     }
 }
 

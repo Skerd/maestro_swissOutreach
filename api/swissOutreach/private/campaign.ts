@@ -10,6 +10,7 @@ import {
     campaignsToDTO,
     campaignToDTO,
 } from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.dto";
+import {CampaignActions} from "@swissOutreachModule/database/schemas/campaign/campaign.actions";
 import {campaignsToSelect} from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.select";
 import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
@@ -19,10 +20,7 @@ import {prospectCompaniesToDTO} from "@swissOutreachModule/utilities/mappers/pro
 import {outreachEmailsToDTO} from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.dto";
 import authMW from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
-import {validateFormZod} from "@coreModule/utilities/middlewares/validateFormZod";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
-import {transactionHandler} from "@coreModule/utilities/middlewares/transactionUtils";
-import {campaignIdFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaignAction.form.validator";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
@@ -52,6 +50,8 @@ const {router: crudRouter} = createCrudRouter({
         };
     },
     buildUpdateData: buildUpdateDataFromSchemaDef(CampaignSchemaDef),
+    // start / cancel / approveAll / sendApproved (D86)
+    actions: CampaignActions,
     afterCreate: async (doc: any) => {
         campaignOrchestrator.enqueue(doc._id.toString(), doc.company?.toString?.() || String(doc.company || ""));
     },
@@ -59,80 +59,6 @@ const {router: crudRouter} = createCrudRouter({
 
 export const router = Router();
 router.use(crudRouter);
-
-router.post(
-    "/start",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 30}),
-    validateFormZod(campaignIdFormSchema),
-    asyncHandler(async (params: any) => {
-        const {company, languageCode, campaignId} = params;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        campaignOrchestrator.enqueue(campaign._id.toString(), company._id.toString());
-        return {data: campaignToDTO(campaign)};
-    }),
-);
-
-router.post(
-    "/cancel",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 30}),
-    validateFormZod(campaignIdFormSchema),
-    asyncHandler(async (params: any) => {
-        const {company, languageCode, campaignId} = params;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        await campaignOrchestrator.cancel(campaign._id.toString());
-        const refreshed = await campaignService.findById(campaign._id);
-        return {data: campaignToDTO(refreshed!)};
-    }),
-);
-
-router.post(
-    "/approveAll",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 20}),
-    transactionHandler(),
-    validateFormZod(campaignIdFormSchema),
-    asyncHandler(async (params: any) => {
-        const {company, languageCode, campaignId, session} = params;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode, session});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        await outreachEmailService.updateMany(
-            {
-                company: company._id,
-                campaignId: campaign._id,
-                status: {$in: ["draft", "edited"]},
-                toEmail: {$type: "string"},
-            },
-            {$set: {status: "approved"}},
-            {withDeleted: false, session},
-        );
-        campaign.stats.approved = await outreachEmailService.count({
-            company: company._id,
-            campaignId: campaign._id,
-            status: "approved",
-        }, {session});
-        await campaign.save({session});
-        return {data: campaignToDTO(campaign)};
-    }),
-);
-
-router.post(
-    "/sendApproved",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 10}),
-    validateFormZod(campaignIdFormSchema),
-    asyncHandler(async (params: any) => {
-        const {company, languageCode, campaignId} = params;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const result = await campaignOrchestrator.sendApproved(campaign._id.toString(), false);
-        const refreshed = await campaignService.findById(campaign._id);
-        return {data: {campaign: campaignToDTO(refreshed!), ...result}};
-    }),
-);
 
 router.get(
     "/:campaignId/prospects",

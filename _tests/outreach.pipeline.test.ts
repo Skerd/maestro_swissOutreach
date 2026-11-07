@@ -1,0 +1,340 @@
+import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from "vitest";
+import {ObjectId} from "mongodb";
+import {connectTestDatabase, disconnectTestDatabase} from "@coreModule/_tests/testDatabase";
+
+// The module's own orchestrator (used by the cron) never reaches a live provider.
+vi.mock("@swissOutreachModule/utilities/adapters/createPorts", async () => (await import("./outreach.fixtures")).createPortsMock);
+
+import {withTenant} from "@coreModule/utilities/endpoints/tenantScope";
+import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
+import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
+import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
+import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
+import {CampaignOrchestrator, campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
+import {retryStuckSwissOutreachCampaigns} from "@swissOutreachModule/utilities/cron/retryStuckCampaigns";
+import type {CrawlResult, MailSendRequest, MailSendResult} from "@swissOutreachModule/utilities/ports";
+import {createCampaign, fakePorts, NO_WEBSITE, PLUMBER, PLUMBER_CRAWL, seedReview} from "./outreach.fixtures";
+
+const companyId = new ObjectId();
+const otherCompanyId = new ObjectId();
+/** The tests act on this company's data, as its requests and jobs do (D16). */
+const asCompany = <T>(fn: () => PromiseLike<T>): Promise<T> => withTenant(companyId, fn);
+const asOther = <T>(fn: () => PromiseLike<T>): Promise<T> => withTenant(otherCompanyId, fn);
+
+const accepted = (messageId = "msg-1") => vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => ({accepted: true, messageId}));
+
+beforeAll(async () => {
+    process.env.SWISS_OUTREACH_REQUEST_DELAY_MS = "0";
+    process.env.SWISS_OUTREACH_RETRY_COUNT = "2";
+    process.env.SWISS_OUTREACH_CONCURRENCY = "1";
+    await connectTestDatabase();
+}, 120000);
+
+afterAll(async () => {
+    await disconnectTestDatabase();
+});
+
+beforeEach(async () => {
+    vi.restoreAllMocks();
+    // Raw collection deletes: the soft-delete plugin would only mark the rows deleted
+    await Promise.all([Campaign, ProspectCompany, OutreachEmail, PipelineRunLog].map((model) => model.collection.deleteMany({})));
+});
+
+describe("campaign pipeline", {timeout: 30000}, () => {
+    it("runs a campaign from draft to awaiting approval with scored prospects and drafts", () => asCompany(async () => {
+        const send = accepted();
+        const campaign = await createCampaign(companyId);
+        await new CampaignOrchestrator(fakePorts({mail: {send}})).run(campaign._id.toString());
+
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("awaiting_approval");
+        expect(stored!.parsedJob!.keywords).toEqual(["plumbing", "Sanitär"]);
+        expect(stored!.stats).toMatchObject({found: 2, enriched: 2, scored: 2, failed: 0, sent: 0});
+
+        const plumber = await ProspectCompany.findOne({uid: PLUMBER.uid});
+        expect(plumber).toMatchObject({status: "scored", website: "https://test-sanitaer.ch", websiteConfidence: 88, city: "Basel", score: 80});
+        expect(plumber!.scoreReason).toBe("official website found; high website confidence; contact email found; relevant services (Sanitär); language match");
+        const empty = await ProspectCompany.findOne({uid: NO_WEBSITE.uid});
+        expect(empty).toMatchObject({status: "scored", score: 35, scoreReason: "canton match (ZH)"});
+        expect(empty!.website).toBeUndefined();
+
+        // One draft per prospect, addressed to the preferred contact address; nothing is sent before approval
+        const plumberEmail = await OutreachEmail.findOne({prospectCompanyId: plumber!._id});
+        expect(plumberEmail).toMatchObject({status: "draft", toEmail: "info@test-sanitaer.ch", subject: "Anfrage Offerte", body: "Guten Tag", language: "de", attempts: 0});
+        const emptyEmail = await OutreachEmail.findOne({prospectCompanyId: empty!._id});
+        expect(emptyEmail!.status).toBe("draft");
+        expect(emptyEmail!.toEmail).toBeUndefined();
+        expect(send).not.toHaveBeenCalled();
+
+        const steps = (await PipelineRunLog.find({campaignId: campaign._id})).map((log) => log.step);
+        expect(steps).toEqual(expect.arrayContaining(["pipeline", "job_parse", "company_search", "enrich", "email_generate", "approval"]));
+    }));
+
+    it("stores a company the register returns twice only once", () => asCompany(async () => {
+        const campaign = await createCampaign(companyId);
+        const ports = fakePorts({registry: {search: async () => [PLUMBER, {...PLUMBER, uid: "che-111.111.111 "}]}});
+        await new CampaignOrchestrator(ports).run(campaign._id.toString());
+        expect(await ProspectCompany.countDocuments({campaignId: campaign._id})).toBe(1);
+        expect((await Campaign.findById(campaign._id))!.stats.found).toBe(1);
+    }));
+
+    it("keeps reviewed emails when the pipeline runs again and redrafts the rest", () => asCompany(async () => {
+        const campaign = await createCampaign(companyId);
+        await new CampaignOrchestrator(fakePorts()).run(campaign._id.toString());
+        const plumber = await ProspectCompany.findOne({uid: PLUMBER.uid});
+        await OutreachEmail.updateOne({prospectCompanyId: plumber!._id}, {$set: {status: "edited", subject: "Mine"}});
+        const empty = await ProspectCompany.findOne({uid: NO_WEBSITE.uid});
+        await OutreachEmail.updateOne({prospectCompanyId: empty!._id}, {$set: {subject: "Old draft"}});
+
+        await new CampaignOrchestrator(fakePorts()).run(campaign._id.toString());
+
+        expect(await OutreachEmail.countDocuments({campaignId: campaign._id})).toBe(2);
+        expect(await OutreachEmail.findOne({prospectCompanyId: plumber!._id})).toMatchObject({status: "edited", subject: "Mine"});
+        expect(await OutreachEmail.findOne({prospectCompanyId: empty!._id})).toMatchObject({status: "draft", subject: "Anfrage Offerte"});
+    }));
+
+    it("sends straight away when the campaign sends automatically, only to prospects with an address", () => asCompany(async () => {
+        const send = accepted("auto-1");
+        const campaign = await createCampaign(companyId, {sendAutomatically: true});
+        await new CampaignOrchestrator(fakePorts({mail: {send}})).run(campaign._id.toString());
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send.mock.calls[0][0]).toMatchObject({
+            companyId: companyId.toString(), to: "info@test-sanitaer.ch", subject: "Anfrage Offerte", text: "Guten Tag", fromEmail: "ada@buyer.ch", fromName: "Ada",
+        });
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("completed");
+        expect(stored!.stats).toMatchObject({sent: 1, approved: 1, failed: 0});
+        const plumber = await ProspectCompany.findOne({uid: PLUMBER.uid});
+        expect(plumber!.status).toBe("sent");
+        expect(await OutreachEmail.findOne({prospectCompanyId: plumber!._id})).toMatchObject({status: "sent", messageId: "auto-1", attempts: 1});
+        const empty = await ProspectCompany.findOne({uid: NO_WEBSITE.uid});
+        expect((await OutreachEmail.findOne({prospectCompanyId: empty!._id}))!.status).toBe("draft");
+    }));
+
+    it("marks a prospect failed and carries on when its enrichment fails", () => asCompany(async () => {
+        const campaign = await createCampaign(companyId);
+        const ports = fakePorts();
+        await new CampaignOrchestrator({
+            ...ports,
+            website: {
+                discoverWebsite: async (companyName, canton) => {
+                    if (companyName === NO_WEBSITE.companyName) throw new Error("search quota exceeded");
+                    return ports.website.discoverWebsite(companyName, canton);
+                },
+                crawl: ports.website.crawl,
+            },
+        }).run(campaign._id.toString());
+
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("awaiting_approval");
+        expect(stored!.stats).toMatchObject({found: 2, enriched: 1, scored: 1, failed: 1});
+        const failed = await ProspectCompany.findOne({uid: NO_WEBSITE.uid});
+        expect(failed!.status).toBe("failed");
+        // A failed prospect gets no draft
+        expect(await OutreachEmail.countDocuments({prospectCompanyId: failed!._id})).toBe(0);
+        expect(await OutreachEmail.countDocuments({campaignId: campaign._id})).toBe(1);
+        expect(await PipelineRunLog.countDocuments({campaignId: campaign._id, step: "enrich", level: "warn"})).toBe(1);
+    }));
+
+    it("fails the campaign with the register's error", () => asCompany(async () => {
+        const campaign = await createCampaign(companyId);
+        await new CampaignOrchestrator(fakePorts({registry: {search: async () => { throw new Error("ZEFIX unavailable"); }}})).run(campaign._id.toString());
+        expect(await Campaign.findById(campaign._id)).toMatchObject({status: "failed", lastError: "ZEFIX unavailable"});
+        expect(await PipelineRunLog.countDocuments({campaignId: campaign._id, level: "error"})).toBe(1);
+    }));
+
+    it("does not run a cancelled campaign or another company's campaign", async () => {
+        const search = vi.fn(async () => [PLUMBER]);
+        const orchestrator = new CampaignOrchestrator(fakePorts({registry: {search}}));
+        const cancelled = await asCompany(() => createCampaign(companyId, {status: "cancelled"}));
+        const foreign = await asOther(() => createCampaign(otherCompanyId));
+
+        await asCompany(() => orchestrator.run(cancelled._id.toString()));
+        await asCompany(() => orchestrator.run(foreign._id.toString()));
+
+        expect(search).not.toHaveBeenCalled();
+        expect((await asCompany(() => Campaign.findById(cancelled._id)))!.status).toBe("cancelled");
+        expect((await asOther(() => Campaign.findById(foreign._id)))!.status).toBe("draft");
+    });
+
+    it("stops at the next step when the campaign is cancelled mid-run", () => asCompany(async () => {
+        let crawlStarted!: () => void;
+        const started = new Promise<void>((resolve) => { crawlStarted = resolve; });
+        let releaseCrawl!: () => void;
+        const gate = new Promise<void>((resolve) => { releaseCrawl = resolve; });
+        const orchestrator = new CampaignOrchestrator(fakePorts({
+            website: {
+                discoverWebsite: async () => ({url: "https://test-sanitaer.ch", confidence: 88}),
+                crawl: async (): Promise<CrawlResult> => {
+                    crawlStarted();
+                    await gate;
+                    return PLUMBER_CRAWL;
+                },
+            },
+        }));
+        const campaign = await createCampaign(companyId);
+
+        const running = orchestrator.run(campaign._id.toString());
+        await started;
+        await orchestrator.cancel(campaign._id.toString());
+        releaseCrawl();
+        await running;
+
+        expect((await Campaign.findById(campaign._id))!.status).toBe("cancelled");
+        expect(await OutreachEmail.countDocuments({campaignId: campaign._id})).toBe(0);
+        expect(await PipelineRunLog.countDocuments({campaignId: campaign._id, step: "cancel"})).toBe(2);
+    }));
+});
+
+describe("sending approved emails", {timeout: 30000}, () => {
+    it("sends each approved email with an address once, even when two sends race", () => asCompany(async () => {
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            return {accepted: true, messageId: "m-1"};
+        });
+        const {campaign, emails, prospects} = await seedReview(companyId, [
+            {status: "approved", toEmail: "info@one.ch"},
+            {status: "draft", toEmail: "info@two.ch"},
+            {status: "skipped", toEmail: "info@three.ch"},
+        ]);
+        const orchestrator = new CampaignOrchestrator(fakePorts({mail: {send}}));
+
+        const results = await Promise.all([orchestrator.sendApproved(campaign._id.toString()), orchestrator.sendApproved(campaign._id.toString())]);
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(results.map((result) => result.sent).sort()).toEqual([0, 1]);
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "sent", messageId: "m-1", attempts: 1});
+        expect(await ProspectCompany.findById(prospects[0]._id)).toMatchObject({status: "sent"});
+        expect((await OutreachEmail.findById(emails[1]._id))!.status).toBe("draft");
+        expect((await OutreachEmail.findById(emails[2]._id))!.status).toBe("skipped");
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("completed");
+        expect(stored!.stats).toMatchObject({sent: 1, approved: 1});
+    }));
+
+    it("retries a failed send within the retry count", () => asCompany(async () => {
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => ({accepted: true, messageId: "m-2"}));
+        send.mockRejectedValueOnce(new Error("SMTP busy"));
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 1, failed: 0});
+
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "sent", attempts: 2, messageId: "m-2"});
+    }));
+
+    it("marks the email failed after the last retry and fails a campaign that sent nothing", () => asCompany(async () => {
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => { throw new Error("SMTP refused"); });
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 0, failed: 1});
+
+        // RETRY_COUNT=2: two tries in all
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "failed", lastError: "SMTP refused", attempts: 2});
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("failed");
+        expect(stored!.stats).toMatchObject({failed: 1, sent: 0, approved: 0});
+    }));
+
+    it("gives an email approved again after failing a fresh retry budget, counting every try", () => asCompany(async () => {
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => { throw new Error("Mailbox full"); });
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}]);
+        // Both failed once already with the whole budget (2 tries) used up
+        await OutreachEmail.updateMany({campaignId: campaign._id}, {$set: {attempts: 2, lastError: "SMTP refused"}});
+        send.mockImplementationOnce(async () => ({accepted: true, messageId: "m-3"}));
+
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 1, failed: 1});
+
+        // Regression: the old loop started at the lifetime count, so the second send never tried and wrote an empty error.
+        expect(send).toHaveBeenCalledTimes(3);
+        const stored = await Promise.all(emails.map((email) => OutreachEmail.findById(email._id)));
+        const sent = stored.find((email) => email!.status === "sent")!;
+        const failed = stored.find((email) => email!.status === "failed")!;
+        expect(sent.attempts).toBe(3);
+        expect(sent.lastError).toBeUndefined();
+        expect(failed).toMatchObject({attempts: 4, lastError: "Mailbox full"});
+    }));
+
+    it("counts what was sent and stops cleanly when the campaign is cancelled mid-send", () => asCompany(async () => {
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}]);
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
+            await Campaign.updateOne({_id: campaign._id}, {$set: {status: "cancelled"}});
+            return {accepted: true, messageId: "m-4"};
+        });
+
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 1, failed: 0});
+
+        expect(send).toHaveBeenCalledTimes(1);
+        const stored = await Campaign.findById(campaign._id);
+        expect(stored!.status).toBe("cancelled");
+        expect(stored!.stats).toMatchObject({sent: 1, approved: 2});
+        const statuses = (await Promise.all(emails.map((email) => OutreachEmail.findById(email._id)))).map((email) => email!.status).sort();
+        expect(statuses).toEqual(["approved", "sent"]);
+    }));
+
+    it("hands the email in hand back to approved when cancelled between tries", () => asCompany(async () => {
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
+            await Campaign.updateOne({_id: campaign._id}, {$set: {status: "cancelled"}});
+            throw new Error("SMTP busy");
+        });
+
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 0, failed: 0});
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "approved", attempts: 1});
+        expect((await Campaign.findById(campaign._id))!.stats.failed).toBe(0);
+    }));
+
+    it("sends nothing for a cancelled campaign", () => asCompany(async () => {
+        const send = accepted();
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}], {status: "cancelled"});
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 0, failed: 0});
+        expect(send).not.toHaveBeenCalled();
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("approved");
+        expect((await Campaign.findById(campaign._id))!.status).toBe("cancelled");
+    }));
+
+    it("cancelling hands claimed emails back to approved", () => asCompany(async () => {
+        const {campaign, emails} = await seedReview(companyId, [{status: "queued", toEmail: "info@one.ch"}, {status: "sent", toEmail: "info@two.ch"}], {status: "sending"});
+        await new CampaignOrchestrator(fakePorts()).cancel(campaign._id.toString());
+        expect((await Campaign.findById(campaign._id))!.status).toBe("cancelled");
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("approved");
+        expect((await OutreachEmail.findById(emails[1]._id))!.status).toBe("sent");
+        expect(await PipelineRunLog.countDocuments({campaignId: campaign._id, step: "cancel", level: "warn"})).toBe(1);
+    }));
+});
+
+describe("stuck campaign cron", {timeout: 30000}, () => {
+    const longAgo = () => new Date(Date.now() - 20 * 60 * 1000);
+
+    it("puts emails left queued for 15 minutes back to approved, only the job company's", async () => {
+        const mine = await asCompany(() => seedReview(companyId, [{status: "queued", toEmail: "a@one.ch"}, {status: "queued", toEmail: "b@one.ch"}], {status: "sending"}));
+        const theirs = await asOther(() => seedReview(otherCompanyId, [{status: "queued", toEmail: "c@two.ch"}], {status: "sending"}));
+        await OutreachEmail.collection.updateMany({_id: {$in: [mine.emails[0]._id, theirs.emails[0]._id]}}, {$set: {updatedAt: longAgo()}});
+
+        await asCompany(() => retryStuckSwissOutreachCampaigns(companyId));
+
+        expect((await asCompany(() => OutreachEmail.findById(mine.emails[0]._id)))!.status).toBe("approved");
+        // Queued a moment ago: a send may still hold it
+        expect((await asCompany(() => OutreachEmail.findById(mine.emails[1]._id)))!.status).toBe("queued");
+        expect((await asOther(() => OutreachEmail.findById(theirs.emails[0]._id)))!.status).toBe("queued");
+    });
+
+    it("restarts discovery stages left for 15 minutes, never a send or a finished campaign", () => asCompany(async () => {
+        const enqueue = vi.spyOn(campaignOrchestrator, "enqueue").mockImplementation(() => undefined);
+        const stuck = await createCampaign(companyId, {status: "searching"});
+        await createCampaign(companyId, {status: "enriching"}); // stuck too, but only a moment ago
+        const sending = await createCampaign(companyId, {status: "sending"});
+        const waiting = await createCampaign(companyId, {status: "awaiting_approval"});
+        const failed = await createCampaign(companyId, {status: "failed"});
+        await Campaign.collection.updateMany({_id: {$in: [stuck._id, sending._id, waiting._id, failed._id]}}, {$set: {updatedAt: longAgo()}});
+
+        await retryStuckSwissOutreachCampaigns(companyId);
+
+        expect(enqueue).toHaveBeenCalledTimes(1);
+        expect(enqueue).toHaveBeenCalledWith(stuck._id.toString(), companyId.toString());
+    }));
+});
