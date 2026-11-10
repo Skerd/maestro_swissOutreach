@@ -5,11 +5,13 @@ import {
     mapOwnershipToDTO,
     mapSoftDeleteToDTO,
 } from "@coreModule/utilities/mappers/plugin/pluginMappers.dto";
+import {nestedEntityToRef, objectIdToString} from "@coreModule/utilities/mappers/common.mapper";
 
 export function prospectCompanyToDTO(doc: IProspectCompany): ProspectCompany {
     return {
         _id: doc._id.toString(),
-        campaignId: doc.campaignId.toString(),
+        // The generic list populates refs; send the id either way.
+        campaignId: objectIdToString(nestedEntityToRef(doc.campaignId)),
         companyName: doc.companyName,
         uid: doc.uid,
         canton: doc.canton,

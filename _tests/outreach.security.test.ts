@@ -18,6 +18,7 @@ import * as campaignRoute from "@swissOutreachModule/api/swissOutreach/private/c
 import * as outreachEmailRoute from "@swissOutreachModule/api/swissOutreach/private/outreachEmail";
 import * as prospectCompanyRoute from "@swissOutreachModule/api/swissOutreach/private/prospectCompany";
 import * as dashboardRoute from "@swissOutreachModule/api/swissOutreach/private/dashboard";
+import * as viewConfigsRoute from "@coreModule/api/auxiliary/private/viewConfigs";
 import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
@@ -35,6 +36,7 @@ const app = appFor([
     {basePath: "/api/swissOutreach/outreachEmail", router: outreachEmailRoute.router, module: "swissOutreach"},
     {basePath: "/api/swissOutreach/prospectCompany", router: prospectCompanyRoute.router, module: "swissOutreach"},
     {basePath: "/api/swissOutreach/dashboard", router: dashboardRoute.router, module: "swissOutreach"},
+    {basePath: "/api/auxiliary/viewConfigs", router: viewConfigsRoute.router, module: "core"},
 ]);
 
 /** Every permission the three models have, the actions included. */
@@ -212,8 +214,14 @@ describe("a campaign's prospects, emails and logs", {timeout: 30000}, () => {
         const emails = await call("post", "outreachEmail", {limit: 50, offset: 0, filter});
         expect(emails.status).toBe(200);
         expect(emails.body.data.map((email: {toEmail: string}) => email.toEmail).sort()).toEqual(["a@one.ch", "b@one.ch"]);
+        // The list populates refs; the rows still carry plain ids (the approval page joins on them).
+        for (const email of emails.body.data as Array<{campaignId: string; prospectCompanyId: string}>) {
+            expect(email.campaignId).toBe(campaign._id.toString());
+            expect(email.prospectCompanyId).toMatch(/^[a-f0-9]{24}$/);
+        }
         const prospects = await call("post", "prospectCompany", {limit: 50, offset: 0, filter});
         expect(prospects.body.total).toBe(2);
+        expect(prospects.body.data.map((prospect: {campaignId: string}) => prospect.campaignId)).toEqual([campaign._id.toString(), campaign._id.toString()]);
     }));
 
     it("logs need a valid campaign id and read access to the campaign's errors, and hold only that campaign's steps", async () => {
@@ -252,4 +260,24 @@ describe("a run of a campaign past its pipeline", {timeout: 30000}, () => {
         }
         expect(search).not.toHaveBeenCalled();
     }));
+});
+
+describe("the campaign sheet", {timeout: 30000}, () => {
+    // `stats` is a plain nested object, so its read fields are flat paths (`stats.found`);
+    // the sheet filter must not lock cards the caller may read.
+    it("shows the results to a caller who may read them", async () => {
+        const response = await request(app).get("/api/auxiliary/viewConfigs").set(callerHeader({...staff, modules: ["core", "swissOutreach"]}));
+        expect(response.status).toBe(200);
+        const fields: Array<{name?: string; locked?: boolean}> = [];
+        const walk = (nodes: Array<{field?: {name?: string; locked?: boolean}; children?: unknown}> = []) => {
+            for (const node of nodes) {
+                if (node.field) fields.push(node.field);
+                walk(node.children as typeof nodes);
+            }
+        };
+        walk(response.body.swissoutreachcampaigns.sheet.nodes);
+        const stats = fields.filter((field) => field.name?.startsWith("stats."));
+        expect(stats.map((field) => field.name)).toContain("stats.found");
+        expect(stats.filter((field) => field.locked)).toEqual([]);
+    });
 });
