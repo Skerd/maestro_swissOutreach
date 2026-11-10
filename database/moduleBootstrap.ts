@@ -4,6 +4,8 @@ import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompa
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
 import SuppressedContact from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact";
+import {registerDefaultRoles} from "@coreModule/database/schemas/role/role.defaults";
+import {swissOutreachDefaultRoles} from "@swissOutreachModule/database/schemas/role/swissOutreach.role.defaults";
 
 export const swissOutreachModels: Model<any>[] = [
     Campaign,
@@ -23,7 +25,10 @@ export async function dropSwissOutreachCollections(): Promise<void> {
     }
 }
 
+registerDefaultRoles(swissOutreachDefaultRoles);
+
 export const moduleBootstrap = {
     models: swissOutreachModels,
     dropModuleCollections: dropSwissOutreachCollections,
+    defaultRoles: swissOutreachDefaultRoles,
 };

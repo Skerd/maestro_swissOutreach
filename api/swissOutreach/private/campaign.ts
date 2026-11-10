@@ -38,8 +38,9 @@ const {router: crudRouter} = createCrudRouter<ICampaign, CreateCampaignFormType,
     toDTO: campaignToDTO,
     toDTOArray: campaignsToDTO,
     toSelect: campaignsToSelect,
-    selectSearchField: "senderCompanyName",
-    selectProjection: "_id senderCompanyName status",
+    selectSearchField: "name",
+    // senderCompanyName: the label of a campaign made before campaigns had a name
+    selectProjection: "_id name senderCompanyName status",
     defaultSort: {createdAt: -1},
     buildCreateData: (params: CrudCreateParams<CreateCampaignFormType>) => {
         const config = getSwissOutreachConfig();

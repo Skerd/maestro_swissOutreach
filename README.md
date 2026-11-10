@@ -21,7 +21,7 @@ swissOutreach/
 │   ├── prospectCompany.ts         # list/edit/delete (only the pipeline creates prospects)
 │   ├── outreachEmail.ts           # list/edit/delete + approve/skip/editDraft/doNotContact (only the pipeline creates emails)
 │   ├── suppressedContact.ts       # the company's do-not-contact list (create/list/delete)
-│   └── dashboard.ts               # GET /summary
+│   └── dashboard.ts               # POST /summary
 ├── database/
 │   ├── moduleBootstrap.ts
 │   └── schemas/
@@ -48,15 +48,17 @@ swissOutreach/
 
 Routes are discovered from `api/swissOutreach/private/`. Mounted under `/api/swissOutreach/<file>`.
 
-The campaign and email actions (`start`, `cancel`, `approveAll`, `sendApproved`, `approve`, `skip`, `editDraft`, `doNotContact`) are `@action` methods in `database/schemas/campaign/campaign.actions.ts` and `database/schemas/outreachEmail/outreachEmail.actions.ts`. Each is its own role permission (`swissoutreachcampaigns[action:<name>]`, `swissoutreachemails[action:<name>]`, D86); admin roles get them. Sent or sending emails cannot be skipped or edited (`email_already_sent`); a campaign sends only from `awaiting_approval`/`completed`/`failed` (`campaign_cannot_send`) and cannot start while running, sending, completed or cancelled (`campaign_cannot_start`) (D85).
+The campaign and email actions (`start`, `cancel`, `approveAll`, `sendApproved`, `approve`, `skip`, `editDraft`, `doNotContact`) are `@action` methods in `database/schemas/campaign/campaign.actions.ts` and `database/schemas/outreachEmail/outreachEmail.actions.ts`. Each is its own role permission (`swissoutreachcampaigns[action:<name>]`, `swissoutreachemails[action:<name>]`, D86); admin roles get them. Sent or sending emails cannot be skipped or edited (`email_already_sent`); a campaign sends only from `awaiting_approval`/`completed`/`failed` (`campaign_cannot_send`) and cannot start while running, sending, completed or cancelled (`campaign_cannot_start`) (D85); a completed or cancelled campaign cannot be cancelled (`campaign_cannot_cancel`). `approve` and `approveAll` skip an email whose recipient is on the do-not-contact list and keep the reason in its `lastError` (TD-B129); `editDraft` can set the recipient (`toEmail`).
+
+Default roles (D113, `database/schemas/role/swissOutreach.role.defaults.ts`, registered by `moduleBootstrap`): **Outreach operator** reads the whole module, creates and edits campaigns, starts and cancels them and rewrites drafts (`editDraft`); **Outreach approver** also approves and skips emails, runs `approveAll` / `sendApproved` / `doNotContact` and keeps the do-not-contact list. Neither deletes or restores campaigns or emails.
 
 | Route file | Base path | Notable endpoints |
 |------------|-----------|-------------------|
 | `campaign.ts` | `/api/swissOutreach/campaign` | Standard CRUD; `POST /start`, `/cancel`, `/approveAll`, `/sendApproved`; `POST /logs` (`{campaignId}`, needs read access to the campaign's `lastError`) |
-| `prospectCompany.ts` | `/api/swissOutreach/prospectCompany` | List (filter `campaignId`, sorted by score), edit, delete; create is `no-permission` |
+| `prospectCompany.ts` | `/api/swissOutreach/prospectCompany` | List (filter `campaignId`, sorted by score; `ids` limits it to given prospects), edit, delete; create is `no-permission` |
 | `outreachEmail.ts` | `/api/swissOutreach/outreachEmail` | List (filter `campaignId`), edit of a draft/edited/skipped/failed email (`email_not_editable` otherwise), delete; `POST /approve`, `/skip`, `/editDraft`, `/doNotContact`; create is `no-permission` |
 | `suppressedContact.ts` | `/api/swissOutreach/suppressedContact` | Create (an address, a domain or both, lower-cased), list, delete; entries are not edited |
-| `dashboard.ts` | `/api/swissOutreach/dashboard` | `GET /summary` (the company's own counts only) |
+| `dashboard.ts` | `/api/swissOutreach/dashboard` | `POST /summary` (`{campaignId?}`; the company's own counts, or one campaign's) |
 
 `status`, `stats`, `parsedJob`, `lastError` (campaign), `status`/`campaignId`/`prospectCompanyId` (email) and `status`/`campaignId`/`dedupeKey` (prospect) are server-owned: no create or edit form writes them.
 
@@ -147,7 +149,7 @@ cd maestro
 npx vitest run modules/swissOutreach
 ```
 
-`outreach.scoring` (scoring, job parsing, drafts), `outreach.pipeline` (orchestrator, sending, cron) and `outreach.approval` (HTTP actions, permissions, tenancy, dashboard) use the fake ports in `outreach.fixtures.ts`; no live provider is called. `outreach.resilience` covers the send throttle, the background send, the circuit breakers, the environment validator and the canton codes.
+`outreach.scoring` (scoring, job parsing, drafts), `outreach.pipeline` (orchestrator, sending, cron) and `outreach.approval` (HTTP actions, permissions, tenancy, dashboard), `outreach.roles` (the default roles' grants, D113) use the fake ports in `outreach.fixtures.ts`; no live provider is called. `outreach.resilience` covers the send throttle, the background send, the circuit breakers, the environment validator and the canton codes.
 
 ## Path alias
 

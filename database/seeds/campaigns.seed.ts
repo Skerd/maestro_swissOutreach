@@ -9,6 +9,7 @@ import type {CampaignSeedRow} from "./types";
 export const campaignsSeed: readonly CampaignSeedRow[] = [
     {
         "id": "6a604ae47e5c12f7ab9d86cc",
+        "name": "Electrical installation, 120 m² unit",
         "jobDescription": "I need to find electrician that can lay the whole electrical work in the 120msq unit.",
         "country": "Switzerland",
         "cantons": [
@@ -71,6 +72,7 @@ export const campaignsSeed: readonly CampaignSeedRow[] = [
     },
     {
         "id": "6a604d7d31c32b576e5bb709",
+        "name": "Neon lighting, 100 m",
         "jobDescription": "I need electrical done to install 100m of neon lighting",
         "country": "Switzerland",
         "cantons": [
@@ -134,6 +136,7 @@ export const campaignsSeed: readonly CampaignSeedRow[] = [
     },
     {
         "id": "6a6051bc3512dbe4f4adf7f4",
+        "name": "Wood flooring, 300 m²",
         "jobDescription": "I need flooring work done. I need to lay about 300 square emters of wood flooring.",
         "country": "Switzerland",
         "cantons": [

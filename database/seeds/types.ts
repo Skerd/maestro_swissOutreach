@@ -41,6 +41,7 @@ export type CampaignStatsSeed = {
 
 export type CampaignSeedRow = {
     id: PreservedId;
+    name: string;
     jobDescription: string;
     country: string;
     /** Two-letter canton codes; `[]` means "search the whole country". */

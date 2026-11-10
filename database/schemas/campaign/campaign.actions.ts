@@ -10,6 +10,7 @@ import type {ICampaign} from "./campaign";
 import {campaignService} from "./campaign.service";
 import {outreachEmailService} from "../outreachEmail/outreachEmail.service";
 import {prospectCompanyService} from "../prospectCompany/prospectCompany.service";
+import {DO_NOT_CONTACT_SKIP_REASON, suppressedContactService} from "../suppressedContact/suppressedContact.service";
 import {campaignToDTO} from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.dto";
 import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
 
@@ -20,6 +21,8 @@ type CampaignParams = AuthenticatedMWType & {campaignId: string};
  * or cancelled for good.
  */
 const STARTABLE: CampaignStatusValue[] = ["draft", "failed", "awaiting_approval"];
+/** A completed or cancelled campaign is history: there is nothing left to stop. */
+const CANCELLABLE: CampaignStatusValue[] = ["draft", "parsing", "searching", "enriching", "scoring", "awaiting_approval", "sending", "failed"];
 /** Approved emails are sent only once the pipeline has stopped. */
 const SENDABLE: CampaignStatusValue[] = ["awaiting_approval", "completed", "failed"];
 
@@ -49,12 +52,18 @@ export class CampaignActions {
     @action({auth: "private", rateLimit: {windowMs: 60000, max: 30}, schema: campaignIdFormSchema})
     async cancel(params: CampaignParams): Promise<{data: CampaignDto}> {
         const campaign = await loadCampaign(params);
+        if (!CANCELLABLE.includes(campaign.status)) {
+            throw apiValidationException("campaign_cannot_cancel", "campaignId", null, params.languageCode);
+        }
         await campaignOrchestrator.cancel(campaign._id.toString());
         const refreshed = await campaignService.findById(campaign._id);
         return {data: campaignToDTO(refreshed!)};
     }
 
-    /** Approves every draft and edited email that has a recipient, and their prospects. */
+    /**
+     * Approves every draft and edited email that has a recipient, and their prospects. An email whose recipient is on
+     * the do-not-contact list is skipped instead, with the reason (TD-B129).
+     */
     @action({auth: "private", transaction: true, rateLimit: {windowMs: 60000, max: 20}, schema: campaignIdFormSchema})
     async approveAll(params: TransactionRequiredParams & CampaignParams): Promise<{data: CampaignDto}> {
         const {company, session} = params;
@@ -63,16 +72,35 @@ export class CampaignActions {
             {company: company._id, campaignId: campaign._id, status: {$in: ["draft", "edited"]}, toEmail: {$type: "string"}},
             {withDeleted: false, session},
             undefined,
-            "_id prospectCompanyId",
+            "_id prospectCompanyId toEmail",
         );
-        if (approvable.length > 0) {
+        const suppressed = await suppressedContactService.suppressedAmong(
+            company._id,
+            approvable.map((email) => email.toEmail ?? ""),
+            session,
+        );
+        const blocked = approvable.filter((email) => suppressed.has((email.toEmail ?? "").trim().toLowerCase()));
+        if (blocked.length > 0) {
             await outreachEmailService.updateMany(
-                {company: company._id, _id: {$in: approvable.map((email) => email._id)}},
+                {company: company._id, _id: {$in: blocked.map((email) => email._id)}},
+                {$set: {status: "skipped", lastError: DO_NOT_CONTACT_SKIP_REASON}},
+                {withDeleted: false, session},
+            );
+            await prospectCompanyService.updateMany(
+                {company: company._id, _id: {$in: blocked.map((email) => email.prospectCompanyId)}},
+                {$set: {status: "skipped"}},
+                {withDeleted: false, session},
+            );
+        }
+        const approved = approvable.filter((email) => !blocked.includes(email));
+        if (approved.length > 0) {
+            await outreachEmailService.updateMany(
+                {company: company._id, _id: {$in: approved.map((email) => email._id)}},
                 {$set: {status: "approved"}},
                 {withDeleted: false, session},
             );
             await prospectCompanyService.updateMany(
-                {company: company._id, _id: {$in: approvable.map((email) => email.prospectCompanyId)}},
+                {company: company._id, _id: {$in: approved.map((email) => email.prospectCompanyId)}},
                 {$set: {status: "approved"}},
                 {withDeleted: false, session},
             );

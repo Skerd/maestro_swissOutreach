@@ -4,6 +4,9 @@ import type {ClientSession} from "mongoose";
 import type {ICompany} from "@coreModule/database/schemas/company/company";
 import SuppressedContact, {ISuppressedContact} from "./suppressedContact";
 
+/** Why an email to a listed address was skipped, kept in its `lastError` (approval and the send loop both check). */
+export const DO_NOT_CONTACT_SKIP_REASON = "The recipient is on the do-not-contact list.";
+
 /** The domain part of an address, lower-cased (`""` when it has none). */
 export function emailDomain(address: string): string {
     return address.slice(address.lastIndexOf("@") + 1).trim().toLowerCase();

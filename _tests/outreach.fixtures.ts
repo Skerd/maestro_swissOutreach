@@ -68,12 +68,13 @@ export const createPortsMock = {
     }),
 };
 
-type CampaignOverrides = Partial<Pick<ICampaign, "cantons" | "language" | "sendAutomatically" | "status" | "maxCompanies">>;
+type CampaignOverrides = Partial<Pick<ICampaign, "name" | "cantons" | "language" | "sendAutomatically" | "status" | "maxCompanies">>;
 
 /** A German-language campaign for plumbers in Zurich, waiting to run. */
 export function createCampaign(company: ObjectId, overrides: CampaignOverrides = {}): Promise<ICampaign> {
     return Campaign.create({
         company,
+        name: "Bathroom plumbing, Zurich",
         jobDescription: "Looking for a plumbing company to renovate two bathrooms.",
         country: "Switzerland",
         cantons: ["ZH"],

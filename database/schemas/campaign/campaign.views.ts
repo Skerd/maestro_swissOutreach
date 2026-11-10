@@ -5,14 +5,17 @@ import {
     swissCantonCodes,
     swissCantonNames,
 } from "armonia/src/modules/swissOutreach/types/constants";
+import {CAMPAIGN_NAME_MAX} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaign.schema-def";
+import {lifecycleSheetGroup} from "@coreModule/database/schemas/shared/lifecycleSheetGroup";
 
+/** The campaign's settings, sender and results; its pipeline and emails live on the detail and approval pages. */
 export const campaignSheetView: ViewConfig = {
     model: "swissoutreachcampaigns",
     viewType: "sheet",
     accessModel: "swissOutreachCampaigns",
     apiUrl: "/api/swissOutreach/campaign",
     header: {
-        titleField: "senderCompanyName",
+        titleField: "name",
         subtitleKey: "campaign",
         showCloseButton: true,
     },
@@ -23,32 +26,165 @@ export const campaignSheetView: ViewConfig = {
             children: [
                 {
                     render: "#SheetGrid",
-                    props: {columns: 2},
+                    props: {columns: 3},
                     children: [
                         {
                             render: "#DisplayCard",
+                            permissions: {read: "name"},
+                            field: {name: "name", widget: "#DisplayCard", label: "name", widgetProps: {icon: "#Tag"}},
+                        },
+                        {
+                            render: "#DisplayCard",
                             permissions: {read: "status"},
-                            field: {
-                                name: "status",
-                                widget: "#DisplayCard",
-                                label: "status",
-                                widgetProps: {icon: "#Tag"},
-                            },
+                            field: {name: "status", widget: "#DisplayCard", label: "status", widgetProps: {icon: "#CircleDot", type: "enum", languageKeyCategory: "statusValues"}},
                         },
                         {
                             render: "#DisplayCard",
                             permissions: {read: "language"},
-                            field: {
-                                name: "language",
-                                widget: "#DisplayCard",
-                                label: "language",
-                                widgetProps: {icon: "#Globe"},
-                            },
+                            field: {name: "language", widget: "#DisplayCard", label: "language", widgetProps: {icon: "#Language", type: "enum", languageKeyCategory: "languageValues"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "emailTone"},
+                            field: {name: "emailTone", widget: "#DisplayCard", label: "emailTone", widgetProps: {icon: "#MoodSmile", type: "enum", languageKeyCategory: "emailToneValues"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "country"},
+                            field: {name: "country", widget: "#DisplayCard", label: "country", widgetProps: {icon: "#World"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "maxCompanies"},
+                            field: {name: "maxCompanies", widget: "#DisplayCard", label: "maxCompanies", widgetProps: {icon: "#Hash", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "sendAutomatically"},
+                            field: {name: "sendAutomatically", widget: "#DisplayCard", label: "sendAutomatically", widgetProps: {icon: "#Send", type: "boolean"}},
+                        },
+                    ],
+                },
+                {
+                    render: "#SheetGrid",
+                    props: {columns: 1},
+                    children: [
+                        {
+                            render: "#DisplayCard",
+                            dependent: "cantons",
+                            permissions: {read: "cantons"},
+                            field: {name: "cantons", widget: "#DisplayCard", label: "cantons", widgetProps: {icon: "#MapPin", valueType: "stringBadgeList"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "jobDescription"},
+                            field: {name: "jobDescription", widget: "#DisplayCard", label: "jobDescription", widgetProps: {icon: "#AlignLeft", expandable: true, maxLength: 250}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            dependent: "additionalNotes",
+                            permissions: {read: "additionalNotes"},
+                            field: {name: "additionalNotes", widget: "#DisplayCard", label: "additionalNotes", widgetProps: {icon: "#Notes", expandable: true, maxLength: 250}},
                         },
                     ],
                 },
             ],
         },
+        {
+            render: "#SheetGroup",
+            props: {title: "sender"},
+            children: [
+                {
+                    render: "#SheetGrid",
+                    props: {columns: 2},
+                    children: [
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "senderCompanyName"},
+                            field: {name: "senderCompanyName", widget: "#DisplayCard", label: "senderCompanyName", widgetProps: {icon: "#Building"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "senderName"},
+                            field: {name: "senderName", widget: "#DisplayCard", label: "senderName", widgetProps: {icon: "#User"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "senderEmail"},
+                            field: {name: "senderEmail", widget: "#DisplayCard", label: "senderEmail", widgetProps: {icon: "#Mail", type: "email"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            dependent: "senderPhone",
+                            permissions: {read: "senderPhone"},
+                            field: {name: "senderPhone", widget: "#DisplayCard", label: "senderPhone", widgetProps: {icon: "#Phone"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            dependent: "senderWebsite",
+                            permissions: {read: "senderWebsite"},
+                            field: {name: "senderWebsite", widget: "#DisplayCard", label: "senderWebsite", widgetProps: {icon: "#Link", externalLink: true}},
+                        },
+                    ],
+                },
+            ],
+        },
+        {
+            render: "#SheetGroup",
+            props: {title: "results"},
+            permissions: {readAny: ["stats", "lastError"]},
+            children: [
+                {
+                    render: "#SheetGrid",
+                    props: {columns: 3},
+                    children: [
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.found"},
+                            field: {name: "stats.found", widget: "#DisplayCard", label: "stats.found", widgetProps: {icon: "#Search", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.enriched"},
+                            field: {name: "stats.enriched", widget: "#DisplayCard", label: "stats.enriched", widgetProps: {icon: "#AddressBook", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.scored"},
+                            field: {name: "stats.scored", widget: "#DisplayCard", label: "stats.scored", widgetProps: {icon: "#Star", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.approved"},
+                            field: {name: "stats.approved", widget: "#DisplayCard", label: "stats.approved", widgetProps: {icon: "#CircleCheck", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.sent"},
+                            field: {name: "stats.sent", widget: "#DisplayCard", label: "stats.sent", widgetProps: {icon: "#MailForward", type: "number"}},
+                        },
+                        {
+                            render: "#DisplayCard",
+                            permissions: {read: "stats.failed"},
+                            field: {name: "stats.failed", widget: "#DisplayCard", label: "stats.failed", widgetProps: {icon: "#AlertTriangle", type: "number"}},
+                        },
+                    ],
+                },
+                {
+                    render: "#SheetGrid",
+                    props: {columns: 1},
+                    children: [
+                        {
+                            render: "#DisplayCard",
+                            dependent: "lastError",
+                            permissions: {read: "lastError"},
+                            field: {name: "lastError", widget: "#DisplayCard", label: "lastError", widgetProps: {icon: "#AlertTriangle"}},
+                        },
+                    ],
+                },
+            ],
+        },
+        lifecycleSheetGroup,
     ],
 };
 
@@ -59,6 +195,17 @@ const emailToneOptions = emailToneValues.map((value) => ({value, label: `form.em
 const cantonOptions = swissCantonCodes.map((value) => ({value, label: `${swissCantonNames[value]} (${value})`}));
 
 const campaignCreateFormNodes: ViewConfig["nodes"] = [
+    {
+        render: "#Field",
+        field: {
+            name: "name",
+            widget: "#Input",
+            label: "form.nameLabel",
+            placeholder: "form.namePlaceholder",
+            required: true,
+            widgetProps: {maxLength: CAMPAIGN_NAME_MAX},
+        },
+    },
     {
         render: "#Field",
         field: {

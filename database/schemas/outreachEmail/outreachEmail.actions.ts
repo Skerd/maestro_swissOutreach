@@ -10,11 +10,11 @@ import type {IOutreachEmail} from "./outreachEmail";
 import {outreachEmailService} from "./outreachEmail.service";
 import {campaignService} from "../campaign/campaign.service";
 import {prospectCompanyService} from "../prospectCompany/prospectCompany.service";
-import {suppressedContactService} from "../suppressedContact/suppressedContact.service";
+import {DO_NOT_CONTACT_SKIP_REASON, suppressedContactService} from "../suppressedContact/suppressedContact.service";
 import {outreachEmailToDTO} from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.dto";
 
 type EmailParams = TransactionRequiredParams & {emailId: string};
-type EditDraftParams = EmailParams & {subject?: string; body?: string};
+type EditDraftParams = EmailParams & {toEmail?: string; subject?: string; body?: string};
 
 async function loadEmail(params: EmailParams): Promise<IOutreachEmail> {
     const {company, languageCode, emailId, session} = params;
@@ -43,14 +43,22 @@ async function skipEmail(email: IOutreachEmail, session: TransactionRequiredPara
 
 /** Review actions on one drafted email (D14, D86): each is its own role permission on `swissoutreachemails`. */
 export class OutreachEmailActions {
-    /** Approves the email for sending, with its prospect. */
+    /**
+     * Approves the email for sending, with its prospect. An email whose recipient is on the do-not-contact list is
+     * skipped instead, with the reason in `lastError` (TD-B129): the answer then shows it `skipped`.
+     */
     @action({auth: "private", transaction: true, rateLimit: {windowMs: 60000, max: 60}, schema: outreachEmailIdFormSchema})
     async approve(params: EmailParams): Promise<{data: OutreachEmailDto}> {
-        const {languageCode, session} = params;
+        const {company, languageCode, session} = params;
         const email = await loadEmail(params);
         if (!email.toEmail) throw apiValidationException("email_missing_recipient", "toEmail", null, languageCode);
         // Already approved, being sent or sent: unchanged, so a sent email never goes back into the send queue.
         if (email.status === "approved" || email.status === "sent" || email.status === "queued") {
+            return {data: outreachEmailToDTO(email)};
+        }
+        if ((await suppressedContactService.suppressedAmong(company._id, [email.toEmail], session)).size > 0) {
+            email.lastError = DO_NOT_CONTACT_SKIP_REASON;
+            await skipEmail(email, session);
             return {data: outreachEmailToDTO(email)};
         }
         email.status = "approved";
@@ -86,13 +94,14 @@ export class OutreachEmailActions {
         return {data: outreachEmailToDTO(email)};
     }
 
-    /** A reviewer's rewrite; the email then needs approving again. */
+    /** A reviewer's rewrite, the recipient included; the email then needs approving again. */
     @action({auth: "private", transaction: true, rateLimit: {windowMs: 60000, max: 60}, schema: editOutreachEmailDraftFormSchema})
     async editDraft(params: EditDraftParams): Promise<{data: OutreachEmailDto}> {
-        const {languageCode, subject, body, session} = params;
+        const {languageCode, toEmail, subject, body, session} = params;
         const email = await loadEmail(params);
         refuseIfSent(email, languageCode);
         const wasApproved = email.status === "approved";
+        if (toEmail) email.toEmail = toEmail;
         if (subject) email.subject = subject;
         if (body) email.body = body;
         email.status = "edited";

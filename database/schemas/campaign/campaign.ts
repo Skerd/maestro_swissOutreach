@@ -12,7 +12,7 @@ import {
 import {COLUMN_TYPE} from "armonia/src/modules/core/database/filter/typeOperators";
 import {addModelData} from "@coreModule/database/collections";
 import {validateSchemaDefAgainstMongoose} from "@coreModule/database/utilities/validateSchemaDefAgainstMongoose";
-import {CampaignSchemaDef} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaign.schema-def";
+import {CAMPAIGN_NAME_MAX, CampaignSchemaDef} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaign.schema-def";
 import {
     campaignStatusValues,
     emailToneValues,
@@ -38,6 +38,8 @@ export interface ICampaign
         IOwnershipPluginFields,
         ISoftDeletePluginFields,
         ILifeCyclePluginFields {
+    /** Required on create; campaigns made before it existed have none (no migration, GLB-06). */
+    name?: string;
     jobDescription: string;
     country: string;
     cantons: SwissCantonCode[];
@@ -59,6 +61,13 @@ export interface ICampaign
 
 const CampaignSchema = new Schema<ICampaign>(
     {
+        name: {
+            type: SchemaTypes.String,
+            required: false,
+            trim: true,
+            maxlength: CAMPAIGN_NAME_MAX,
+            dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.STRING},
+        },
         jobDescription: {
             type: SchemaTypes.String,
             required: true,

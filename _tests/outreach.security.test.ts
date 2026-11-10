@@ -105,7 +105,7 @@ describe("server-owned fields and records", {timeout: 30000}, () => {
     it("a campaign edit cannot change its status: a cancelled campaign stays cancelled", () => asCompany(async () => {
         const campaign = await createCampaign(companyId, {status: "cancelled"});
         const response = await call("patch", "campaign", {
-            _id: campaign._id.toString(), status: "draft", stats: {sent: 99},
+            _id: campaign._id.toString(), status: "draft", stats: {sent: 99}, name: "Three bathrooms",
             jobDescription: "Looking for a plumbing company to renovate three bathrooms.", country: "Switzerland", maxCompanies: 10,
             language: "de", emailTone: "professional", senderCompanyName: "Buyer AG", senderName: "Ada", senderEmail: "ada@buyer.ch",
         });
@@ -144,6 +144,7 @@ describe("server-owned fields and records", {timeout: 30000}, () => {
 describe("creating a campaign", {timeout: 30000}, () => {
     it("runs its pipeline once the create has committed", async () => {
         const response = await call("put", "campaign", {
+            name: "Two bathrooms",
             jobDescription: "Looking for a plumbing company to renovate two bathrooms.", country: "Switzerland", cantons: ["ZH"], maxCompanies: 5,
             language: "de", emailTone: "professional", senderCompanyName: "Buyer AG", senderName: "Ada", senderEmail: "ada@buyer.ch",
         });
@@ -156,14 +157,45 @@ describe("creating a campaign", {timeout: 30000}, () => {
     });
 });
 
+describe("a campaign's name", {timeout: 30000}, () => {
+    const newCampaign = {
+        jobDescription: "Looking for a plumbing company to renovate two bathrooms.", country: "Switzerland", maxCompanies: 5,
+        language: "de", emailTone: "professional", senderCompanyName: "Buyer AG", senderName: "Ada", senderEmail: "ada@buyer.ch",
+    };
+
+    it("is required on create", () => asCompany(async () => {
+        const response = await call("put", "campaign", newCampaign);
+        expect(response.status).toBe(400);
+        expect(response.body.error_code).toBe("form_not_correct");
+        expect(await Campaign.countDocuments({})).toBe(0);
+    }));
+
+    it("is what the campaign picker searches and shows", () => asCompany(async () => {
+        await createCampaign(companyId, {name: "Roof repair, Basel"});
+        await createCampaign(companyId);
+        const response = await call("post", "campaign/select", {page: 1, limit: 20, name: "roof"});
+        expect(response.status).toBe(200);
+        expect(response.body.data.map((option: {label: string}) => option.label)).toEqual(["Roof repair, Basel (draft)"]);
+    }));
+
+    it("of a campaign made before campaigns had one is its sender company", () => asCompany(async () => {
+        const {_id} = await createCampaign(companyId);
+        await Campaign.collection.updateOne({_id}, {$unset: {name: ""}});
+        const response = await call("post", "campaign/single", {_id: _id.toString()});
+        expect(response.status).toBe(200);
+        expect(response.body.name).toBe("Buyer AG");
+    }));
+});
+
 // Regression (A6): the dashboard answered every tenant with the process-wide counters and the operator's providers.
 describe("dashboard summary", {timeout: 30000}, () => {
     it("holds the company's own counts and nothing about the server", async () => {
-        const response = await request(app).get("/api/swissOutreach/dashboard/summary").set(callerHeader(staff));
+        const response = await call("post", "dashboard/summary", {});
         expect(response.status).toBe(200);
+        // No replies count: nothing tracks replies, so it could only ever say 0.
         expect(Object.keys(response.body.data).sort()).toEqual([
             "averageScore", "campaignsActive", "campaignsTotal", "companiesContacted", "companiesFound", "emailsSent", "failures",
-            "repliesReceived", "successRate",
+            "successRate",
         ]);
     });
 });

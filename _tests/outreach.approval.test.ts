@@ -21,6 +21,8 @@ import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
+import SuppressedContact from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact";
+import {DO_NOT_CONTACT_SKIP_REASON} from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact.service";
 import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
 import type {MailSendRequest, MailSendResult} from "@swissOutreachModule/utilities/ports";
 import {createCampaign, fakePorts, seedReview, testPorts} from "./outreach.fixtures";
@@ -70,7 +72,7 @@ beforeEach(async () => {
     send.mockClear();
     testPorts.current = fakePorts({mail: {send}});
     // Raw collection deletes: the soft-delete plugin would only mark the rows deleted
-    await Promise.all([Campaign, ProspectCompany, OutreachEmail, PipelineRunLog].map((model) => model.collection.deleteMany({})));
+    await Promise.all([Campaign, ProspectCompany, OutreachEmail, PipelineRunLog, SuppressedContact].map((model) => model.collection.deleteMany({})));
 });
 
 describe("approving one email", {timeout: 30000}, () => {
@@ -93,6 +95,26 @@ describe("approving one email", {timeout: 30000}, () => {
         expect(response.status).toBe(400);
         expect(response.body.error_code).toBe("email_missing_recipient");
         expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("draft");
+    }));
+
+    // Regression (TD-B129): approve did not check the do-not-contact list, so the email showed approved.
+    it("skips an email whose recipient is on the do-not-contact list, with the reason, instead of approving it", () => asCompany(async () => {
+        const {campaign, emails, prospects} = await seedReview(companyId, [{status: "failed", toEmail: "Info@One.ch"}]);
+        await SuppressedContact.create({company: companyId, source: "manual", domain: "one.ch"});
+
+        const response = await post("outreachEmail/approve", {emailId: emails[0]._id.toString()});
+        expect(response.status).toBe(200);
+        expect(response.body.data).toMatchObject({status: "skipped", lastError: DO_NOT_CONTACT_SKIP_REASON});
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "skipped", lastError: DO_NOT_CONTACT_SKIP_REASON});
+        expect((await ProspectCompany.findById(prospects[0]._id))!.status).toBe("skipped");
+        expect((await Campaign.findById(campaign._id))!.stats.approved).toBe(0);
+    }));
+
+    it("approves a failed email again, so the next send retries it", () => asCompany(async () => {
+        const {emails} = await seedReview(companyId, [{status: "failed", toEmail: "info@one.ch"}]);
+        const response = await post("outreachEmail/approve", {emailId: emails[0]._id.toString()});
+        expect(response.status).toBe(200);
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("approved");
     }));
 
     // Regression: approving a sent or in-flight email put it back to `approved`, so the next send mailed it again.
@@ -179,6 +201,22 @@ describe("skipping and editing", {timeout: 30000}, () => {
         expect((await Campaign.findById(campaign._id))!.stats.approved).toBe(0);
     }));
 
+    // Regression: an email drafted without a recipient could never be approved, since no edit could set one.
+    it("an edit sets the recipient, so an email without one can then be approved", () => asCompany(async () => {
+        const {emails} = await seedReview(companyId, [{status: "draft"}]);
+        const emailId = emails[0]._id.toString();
+
+        const invalid = await post("outreachEmail/editDraft", {emailId, toEmail: "not an address"});
+        expect(invalid.status).toBe(400);
+        expect(invalid.body.error_code).toBe("form_not_correct");
+        expect((await OutreachEmail.findById(emailId))!.toEmail).toBeUndefined();
+
+        const edited = await post("outreachEmail/editDraft", {emailId, toEmail: "offerte@one.ch"});
+        expect(edited.status).toBe(200);
+        expect(await OutreachEmail.findById(emailId)).toMatchObject({status: "edited", toEmail: "offerte@one.ch", subject: "Anfrage Offerte"});
+        expect((await post("outreachEmail/approve", {emailId})).body.data.status).toBe("approved");
+    }));
+
     it("an edit changes only the parts given and marks the email edited", () => asCompany(async () => {
         const {emails} = await seedReview(companyId, [{status: "draft", toEmail: "info@one.ch"}]);
         const response = await post("outreachEmail/editDraft", {emailId: emails[0]._id.toString(), subject: "Neue Anfrage"});
@@ -208,6 +246,21 @@ describe("approving a whole campaign", {timeout: 30000}, () => {
         expect((await Campaign.findById(campaign._id))!.stats.approved).toBe(3);
         const prospectStatuses = await Promise.all(prospects.map(async (prospect) => (await ProspectCompany.findById(prospect._id))!.status));
         expect(prospectStatuses).toEqual(["approved", "approved", "scored", "scored", "scored", "sent"]);
+    }));
+
+    it("skips the emails to addresses on the do-not-contact list, with the reason, and approves the rest", () => asCompany(async () => {
+        const {campaign, emails, prospects} = await seedReview(companyId, [
+            {status: "draft", toEmail: "a@one.ch"},
+            {status: "edited", toEmail: "stop@two.ch"},
+        ]);
+        await SuppressedContact.create({company: companyId, source: "manual", email: "stop@two.ch"});
+
+        const response = await post("campaign/approveAll", {campaignId: campaign._id.toString()});
+        expect(response.status).toBe(200);
+        expect(response.body.data.stats.approved).toBe(1);
+        expect(await OutreachEmail.findById(emails[0]._id)).toMatchObject({status: "approved"});
+        expect(await OutreachEmail.findById(emails[1]._id)).toMatchObject({status: "skipped", lastError: DO_NOT_CONTACT_SKIP_REASON});
+        expect((await ProspectCompany.findById(prospects[1]._id))!.status).toBe("skipped");
     }));
 
     it("then sends the approved emails through the mail port", () => asCompany(async () => {
@@ -283,6 +336,18 @@ describe("approving a whole campaign", {timeout: 30000}, () => {
         const response = await post("campaign/cancel", {campaignId: campaign._id.toString()});
         expect(response.status).toBe(200);
         expect(response.body.data.status).toBe("cancelled");
+    }));
+
+    // Regression: cancel had no status check, so a completed campaign could be turned into a cancelled one.
+    it("refuses to cancel a completed or cancelled campaign", () => asCompany(async () => {
+        for (const status of ["completed", "cancelled"] as const) {
+            const campaign = await createCampaign(companyId, {status});
+            const response = await post("campaign/cancel", {campaignId: campaign._id.toString()});
+            expect(response.status).toBe(409);
+            expect(response.body.error_code).toBe("campaign_cannot_cancel");
+            expect((await Campaign.findById(campaign._id))!.status).toBe(status);
+        }
+        expect(await PipelineRunLog.countDocuments({step: "cancel"})).toBe(0);
     }));
 });
 
@@ -363,9 +428,9 @@ describe("dashboard summary", {timeout: 30000}, () => {
         // Another company's records count for nothing
         await asOther(() => seedReview(otherCompanyId, [{status: "sent", toEmail: "x@two.ch"}]));
 
-        const response = await request(app).get("/api/swissOutreach/dashboard/summary").set(callerHeader(staff));
+        const response = await post("dashboard/summary", {});
         expect(response.status).toBe(200);
-        expect(response.body.data).toMatchObject({
+        expect(response.body.data).toEqual({
             companiesFound: 6,
             companiesContacted: 3,
             emailsSent: 3,
@@ -375,7 +440,28 @@ describe("dashboard summary", {timeout: 30000}, () => {
             averageScore: 55.2,
             campaignsTotal: 2,
             campaignsActive: 1,
-            repliesReceived: 0,
         });
+    });
+
+    it("counts one campaign's prospects and sends when a campaign is picked", async () => {
+        const {campaign} = await asCompany(() => seedReview(companyId, [
+            {status: "sent", toEmail: "a@one.ch"},
+            {status: "failed", toEmail: "b@one.ch"},
+        ]));
+        await asCompany(() => seedReview(companyId, [{status: "sent", toEmail: "c@one.ch"}, {status: "sent", toEmail: "d@one.ch"}], {status: "completed"}));
+
+        const response = await post("dashboard/summary", {campaignId: campaign._id.toString()});
+        expect(response.status).toBe(200);
+        expect(response.body.data).toEqual({
+            companiesFound: 2,
+            companiesContacted: 1,
+            emailsSent: 1,
+            failures: 1,
+            successRate: 50,
+            averageScore: 50,
+            campaignsTotal: 1,
+            campaignsActive: 1,
+        });
+        expect((await post("dashboard/summary", {campaignId: "not-an-id"})).body.error_code).toBe("form_not_correct");
     });
 });

@@ -37,7 +37,7 @@ import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipel
 import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
-import {suppressedContactService} from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact.service";
+import {DO_NOT_CONTACT_SKIP_REASON, suppressedContactService} from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact.service";
 import type {CampaignStatusValue} from "armonia/src/modules/swissOutreach/types/constants";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
 import {CONSTANTS} from "@coreModule/environment";
@@ -543,7 +543,7 @@ export class CampaignOrchestrator {
                 // Checked at send time too: the address may have gone on the list after the email was approved.
                 if ((await suppressedContactService.suppressedAmong(campaign.company, [email.toEmail!])).size > 0) {
                     email.status = "skipped";
-                    email.lastError = "The recipient is on the do-not-contact list.";
+                    email.lastError = DO_NOT_CONTACT_SKIP_REASON;
                     await email.save();
                     await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "skipped"}});
                     claimed = null;

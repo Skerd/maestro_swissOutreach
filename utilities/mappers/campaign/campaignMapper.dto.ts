@@ -6,9 +6,15 @@ import {
     mapSoftDeleteToDTO,
 } from "@coreModule/utilities/mappers/plugin/pluginMappers.dto";
 
+/** A campaign made before campaigns had a name is called by its sender company, as it was then. */
+export function campaignName(campaign: Pick<ICampaign, "name" | "senderCompanyName">): string {
+    return campaign.name || campaign.senderCompanyName;
+}
+
 export function campaignToDTO(campaign: ICampaign): Campaign {
     return {
         _id: campaign._id.toString(),
+        name: campaignName(campaign),
         jobDescription: campaign.jobDescription,
         country: campaign.country,
         cantons: campaign.cantons || [],

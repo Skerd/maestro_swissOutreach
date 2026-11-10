@@ -213,6 +213,7 @@ describe("environment validator", () => {
 
 describe("campaign cantons", {timeout: 30000}, () => {
     const form = {
+        name: "Bathroom renovation",
         jobDescription: "Looking for a plumbing company to renovate two bathrooms.",
         country: "Switzerland",
         maxCompanies: 10,

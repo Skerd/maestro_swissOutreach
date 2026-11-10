@@ -4,6 +4,7 @@ import {defineSnippet} from "@coreModule/database/utilities/snippet";
 
 export const CampaignSimpleSnippet = defineSnippet<ICampaign, CampaignSimple>()({
     keys: {
+        name: {},
         jobDescription: {},
         status: {},
         language: {},

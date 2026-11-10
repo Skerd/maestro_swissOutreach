@@ -30,6 +30,7 @@ export async function createCampaigns(
         try {
             const campaignId = new ObjectId(row.id);
             const payload = {
+                name: row.name,
                 jobDescription: row.jobDescription,
                 country: row.country,
                 cantons: [...row.cantons],
