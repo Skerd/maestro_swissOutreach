@@ -91,7 +91,14 @@ const ProspectCompanySchema = new Schema<IProspectCompany>(
         },
         dedupeKey: {type: SchemaTypes.String, required: true},
     },
-    {accessMode: "loose"},
+    {
+        accessMode: "loose",
+        // Only the campaign pipeline finds prospects
+        permissions: {
+            self: {create: "no-permission"},
+            others: {create: "no-permission"},
+        },
+    },
 );
 
 ownershipPlugin(ProspectCompanySchema);
@@ -105,6 +112,10 @@ normalizeSchemaPermissions(ProspectCompany);
 export default ProspectCompany;
 
 addModelData(ProspectCompany, prospectCompanyViews);
+// Server-owned: the pipeline sets them, never an edit form.
 validateSchemaDefAgainstMongoose(ProspectCompanySchema, ProspectCompanySchemaDef, "SwissOutreachProspectCompany", [
     "company",
+    "campaignId",
+    "status",
+    "dedupeKey",
 ]);

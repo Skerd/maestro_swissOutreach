@@ -1,5 +1,6 @@
 /**
- * Env-backed configuration for swissOutreach. Never hardcode operational limits.
+ * Env-backed configuration for swissOutreach. Never hardcode operational limits. The values are checked at boot by
+ * `environment.validator.ts`; a value that is unset (or, outside boot, unreadable) falls back to its default here.
  */
 
 function parseIntEnv(key: string, fallback: number): number {
@@ -9,11 +10,16 @@ function parseIntEnv(key: string, fallback: number): number {
     return Number.isFinite(n) ? n : fallback;
 }
 
-function parseListEnv(key: string, fallback: string[]): string[] {
-    const raw = process.env[key];
-    if (!raw?.trim()) return fallback;
-    return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
+export const WEB_SEARCH_PROVIDERS = ["serper", "bing", "google", "none"] as const;
+export const LLM_PROVIDERS = ["openai", "ollama"] as const;
+/** `m365` and `office365` are accepted spellings of `microsoft365`. */
+export const EMAIL_PROVIDERS = ["smtp", "gmail", "microsoft365", "m365", "office365"] as const;
+
+export type WebSearchProvider = (typeof WEB_SEARCH_PROVIDERS)[number];
+export type LlmProvider = (typeof LLM_PROVIDERS)[number];
+
+/** Conservative default: a steady trickle well under every mail provider's sending limits. */
+export const DEFAULT_MAX_SENDS_PER_MINUTE = 10;
 
 export type SwissOutreachConfig = {
     maxCompaniesDefault: number;
@@ -22,26 +28,29 @@ export type SwissOutreachConfig = {
     retryCount: number;
     concurrency: number;
     requestDelayMs: number;
-    supportedCountries: string[];
-    supportedLanguages: string[];
+    /** Successful sends of one campaign are spaced so no more than this many go out per minute. */
+    maxSendsPerMinute: number;
+    /** Runs and sends go through the Kafka pipeline topic (with an in-process fallback) instead of in-process. */
+    useKafkaPipeline: boolean;
     zefixBaseUrl: string;
     zefixUsername: string;
     zefixPassword: string;
-    webSearchProvider: "serper" | "bing" | "google" | "none";
+    webSearchProvider: WebSearchProvider;
     serperApiKey: string;
     bingApiKey: string;
-    emailProvider: "smtp" | "gmail" | "microsoft365";
-    llmProvider: "openai" | "ollama";
+    googleCseApiKey: string;
+    googleCseCx: string;
+    llmProvider: LlmProvider;
     llmBaseUrl: string;
     llmApiKey: string;
     llmModel: string;
-    kafkaTopicPipeline: string;
 };
 
+function oneOf<T extends string>(values: readonly T[], raw: string, fallback: T): T {
+    return values.find((value) => value === raw) ?? fallback;
+}
+
 export function getSwissOutreachConfig(): SwissOutreachConfig {
-    const provider = (process.env.SWISS_OUTREACH_WEB_SEARCH_PROVIDER || "none").toLowerCase();
-    const llm = (process.env.SWISS_OUTREACH_LLM_PROVIDER || "ollama").toLowerCase();
-    const email = (process.env.SWISS_OUTREACH_EMAIL_PROVIDER || "smtp").toLowerCase();
     return {
         maxCompaniesDefault: parseIntEnv("SWISS_OUTREACH_MAX_COMPANIES_DEFAULT", 50),
         searchDepth: parseIntEnv("SWISS_OUTREACH_SEARCH_DEPTH", 3),
@@ -49,24 +58,20 @@ export function getSwissOutreachConfig(): SwissOutreachConfig {
         retryCount: parseIntEnv("SWISS_OUTREACH_RETRY_COUNT", 3),
         concurrency: parseIntEnv("SWISS_OUTREACH_CONCURRENCY", 3),
         requestDelayMs: parseIntEnv("SWISS_OUTREACH_REQUEST_DELAY_MS", 750),
-        supportedCountries: parseListEnv("SWISS_OUTREACH_SUPPORTED_COUNTRIES", ["Switzerland", "CH", "Schweiz"]),
-        supportedLanguages: parseListEnv("SWISS_OUTREACH_SUPPORTED_LANGUAGES", ["de", "fr", "it", "en"]),
+        maxSendsPerMinute: Math.max(1, parseIntEnv("SWISS_OUTREACH_MAX_SENDS_PER_MINUTE", DEFAULT_MAX_SENDS_PER_MINUTE)),
+        // Opt-in: with KAFKA_ENABLED alone a publish can succeed while no consumer runs the event.
+        useKafkaPipeline: process.env.SWISS_OUTREACH_USE_KAFKA_PIPELINE === "true",
         zefixBaseUrl:
             process.env.SWISS_OUTREACH_ZEFIX_BASE_URL ||
             "https://www.zefix.ch/ZefixREST/api/v1",
         zefixUsername: process.env.SWISS_OUTREACH_ZEFIX_USERNAME || "",
         zefixPassword: process.env.SWISS_OUTREACH_ZEFIX_PASSWORD || "",
-        webSearchProvider:
-            provider === "serper" || provider === "bing" || provider === "google" ? provider : "none",
+        webSearchProvider: oneOf(WEB_SEARCH_PROVIDERS, (process.env.SWISS_OUTREACH_WEB_SEARCH_PROVIDER || "none").toLowerCase(), "none"),
         serperApiKey: process.env.SWISS_OUTREACH_SERPER_API_KEY || "",
         bingApiKey: process.env.SWISS_OUTREACH_BING_API_KEY || "",
-        emailProvider:
-            email === "gmail"
-                ? "gmail"
-                : email === "microsoft365" || email === "m365" || email === "office365"
-                  ? "microsoft365"
-                  : "smtp",
-        llmProvider: llm === "openai" ? "openai" : "ollama",
+        googleCseApiKey: process.env.SWISS_OUTREACH_GOOGLE_CSE_API_KEY || "",
+        googleCseCx: process.env.SWISS_OUTREACH_GOOGLE_CSE_CX || "",
+        llmProvider: oneOf(LLM_PROVIDERS, (process.env.SWISS_OUTREACH_LLM_PROVIDER || "ollama").toLowerCase(), "ollama"),
         llmBaseUrl:
             process.env.SWISS_OUTREACH_LLM_BASE_URL ||
             process.env.AI_ASSISTANT_BASE_URL ||
@@ -76,6 +81,5 @@ export function getSwissOutreachConfig(): SwissOutreachConfig {
             process.env.SWISS_OUTREACH_LLM_MODEL ||
             process.env.AI_ASSISTANT_MODEL ||
             "llama3.1:8b",
-        kafkaTopicPipeline: process.env.KAFKA_TOPIC_SWISS_OUTREACH_PIPELINE || "swissOutreach.pipeline",
     };
 }

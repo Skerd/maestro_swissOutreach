@@ -1,14 +1,11 @@
 import {Router} from "express";
-import authMW from "@coreModule/utilities/middlewares/authMW";
+import authMW, {type AuthenticatedMWType} from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
 import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
 import type {SwissOutreachDashboardSummary} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/dashboard/dashboard.dto";
-import {getSwissOutreachMetrics} from "@swissOutreachModule/utilities/monitoring/metrics";
-import {MAIL_PROVIDER_PRESETS, resolveMailProviderKind} from "@swissOutreachModule/utilities/adapters/mailProviderFactory";
-import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
 export const router = Router();
 
@@ -16,7 +13,7 @@ router.get(
     "/summary",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 60}),
-    asyncHandler(async (params: any) => {
+    asyncHandler(async (params: AuthenticatedMWType) => {
         const {company} = params;
         const companyId = company._id;
 
@@ -62,22 +59,7 @@ router.get(
             campaignsActive,
         };
 
-        return {
-            data: {
-                ...summary,
-                runtimeMetrics: getSwissOutreachMetrics(),
-                config: {
-                    emailProvider: resolveMailProviderKind(),
-                    emailPreset: MAIL_PROVIDER_PRESETS[resolveMailProviderKind()],
-                    webSearchProvider: getSwissOutreachConfig().webSearchProvider,
-                    llmProvider: getSwissOutreachConfig().llmProvider,
-                    zefixConfigured: true,
-                    zefixMode:
-                        getSwissOutreachConfig().zefixUsername && getSwissOutreachConfig().zefixPassword
-                            ? "authenticated"
-                            : "public",
-                },
-            },
-        };
+        // The company's own counts only: process-wide counters and the operator's provider setup are not tenant data.
+        return {data: summary};
     }),
 );

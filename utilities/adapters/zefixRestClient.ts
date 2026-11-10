@@ -1,8 +1,12 @@
 import {getLogger} from "@coreModule/loggers/serverLog";
+import {CircuitBreaker} from "@coreModule/utilities/circuitBreaker";
 import type {CompanyRegistryPort, CompanySearchQuery, RegistryCompany} from "@swissOutreachModule/utilities/ports";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
 const logger = getLogger("swissOutreach.zefix");
+
+/** ZEFIX failing again and again (down, rate-limiting us) fails the next searches fast instead of waiting each out (BE-09). */
+export const zefixCircuitBreaker = new CircuitBreaker({name: "swissOutreach.zefix", logger});
 
 /** Same catalog the public zefix.ch SPA loads from /legalForm. */
 const LEGAL_FORM_BY_ID: Record<number, string> = {
@@ -57,7 +61,6 @@ function mapFirmHit(raw: any): RegistryCompany | null {
         registerUrl:
             raw.cantonalExcerptWeb ||
             (raw.ehraid ? `https://www.zefix.ch/en/search/entity/list/firm/${raw.ehraid}` : undefined),
-        purpose: raw.purpose || undefined,
     };
 }
 
@@ -111,11 +114,6 @@ export class ZefixRestClient implements CompanyRegistryPort {
             }
         }
 
-        // Enrich purpose from firm detail when using the public SPA API (list hits omit purpose).
-        if (!useAuthenticated) {
-            await this.enrichPurposes(results.slice(0, query.maxResults), config.requestTimeoutMs);
-        }
-
         return results.slice(0, query.maxResults);
     }
 
@@ -136,25 +134,27 @@ export class ZefixRestClient implements CompanyRegistryPort {
         // Public firm/search may ignore canton; still send it when present.
         if (input.canton) body.canton = input.canton.toUpperCase();
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
-        try {
-            const response = await fetch(url, {
-                method: "POST",
-                headers: spaHeaders(),
-                body: JSON.stringify(body),
-                signal: controller.signal,
-            });
-            if (!response.ok) {
-                const text = await response.text().catch(() => "");
-                throw new Error(`ZEFIX firm/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+        return zefixCircuitBreaker.execute(async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: spaHeaders(),
+                    body: JSON.stringify(body),
+                    signal: controller.signal,
+                });
+                if (!response.ok) {
+                    const text = await response.text().catch(() => "");
+                    throw new Error(`ZEFIX firm/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+                }
+                const json = await response.json();
+                const list = Array.isArray(json) ? json : json?.list || [];
+                return (list as any[]).map(mapFirmHit).filter(Boolean) as RegistryCompany[];
+            } finally {
+                clearTimeout(timer);
             }
-            const json = await response.json();
-            const list = Array.isArray(json) ? json : json?.list || [];
-            return (list as any[]).map(mapFirmHit).filter(Boolean) as RegistryCompany[];
-        } finally {
-            clearTimeout(timer);
-        }
+        });
     }
 
     private async searchAuthenticated(input: {
@@ -174,74 +174,46 @@ export class ZefixRestClient implements CompanyRegistryPort {
         };
         if (input.canton) body.canton = input.canton.toUpperCase();
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
-        try {
-            const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Accept: "application/json",
-                    ...authHeader(config.zefixUsername, config.zefixPassword),
-                },
-                body: JSON.stringify(body),
-                signal: controller.signal,
-            });
-            if (!response.ok) {
-                const text = await response.text().catch(() => "");
-                throw new Error(`ZEFIX company/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
-            }
-            const json = await response.json();
-            const list = Array.isArray(json) ? json : json?.list || json?.companies || json?.data || [];
-            return (list as any[])
-                .map((raw) => {
-                    const name =
-                        typeof raw?.name === "string"
-                            ? raw.name
-                            : raw?.name?.de || raw?.name?.fr || raw?.name?.it || raw?.name?.en;
-                    if (!name) return null;
-                    return {
-                        companyName: String(name),
-                        uid: raw.uid || raw.uidOrganisationId,
-                        canton: raw.canton || raw.legalSeat?.canton,
-                        legalForm: raw.legalForm?.name?.de || raw.legalForm?.name || raw.legalForm,
-                        registerUrl: raw.zefixDetailWeb || raw.detailWeb || raw.ehraIdWeb,
-                        purpose: raw.purpose || raw.translation?.purpose,
-                    } as RegistryCompany;
-                })
-                .filter(Boolean) as RegistryCompany[];
-        } finally {
-            clearTimeout(timer);
-        }
-    }
-
-    private async enrichPurposes(companies: RegistryCompany[], timeoutMs: number): Promise<void> {
-        await Promise.all(
-            companies.map(async (company) => {
-                const ehraid = company.registerUrl?.match(/firm\/(\d+)/)?.[1];
-                if (!ehraid || company.purpose) return;
-                try {
-                    const controller = new AbortController();
-                    const timer = setTimeout(() => controller.abort(), timeoutMs);
-                    const response = await fetch(`https://www.zefix.ch/ZefixREST/api/v1/firm/${ehraid}`, {
-                        headers: {
-                            Accept: "application/json",
-                            Origin: "https://www.zefix.ch",
-                            Referer: "https://www.zefix.ch/en/search/entity/list",
-                        },
-                        signal: controller.signal,
-                    });
-                    clearTimeout(timer);
-                    if (!response.ok) return;
-                    const detail = await response.json();
-                    if (typeof detail?.purpose === "string" && detail.purpose.trim()) {
-                        company.purpose = detail.purpose.trim().slice(0, 2000);
-                    }
-                } catch (err: any) {
-                    logger.debug(`ZEFIX firm detail enrich failed for ${company.companyName}: ${err?.message || err}`);
+        return zefixCircuitBreaker.execute(async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        ...authHeader(config.zefixUsername, config.zefixPassword),
+                    },
+                    body: JSON.stringify(body),
+                    signal: controller.signal,
+                });
+                if (!response.ok) {
+                    const text = await response.text().catch(() => "");
+                    throw new Error(`ZEFIX company/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
                 }
-            }),
-        );
+                const json = await response.json();
+                const list = Array.isArray(json) ? json : json?.list || json?.companies || json?.data || [];
+                return (list as any[])
+                    .map((raw) => {
+                        const name =
+                            typeof raw?.name === "string"
+                                ? raw.name
+                                : raw?.name?.de || raw?.name?.fr || raw?.name?.it || raw?.name?.en;
+                        if (!name) return null;
+                        return {
+                            companyName: String(name),
+                            uid: raw.uid || raw.uidOrganisationId,
+                            canton: raw.canton || raw.legalSeat?.canton,
+                            legalForm: raw.legalForm?.name?.de || raw.legalForm?.name || raw.legalForm,
+                            registerUrl: raw.zefixDetailWeb || raw.detailWeb || raw.ehraIdWeb,
+                        } as RegistryCompany;
+                    })
+                    .filter(Boolean) as RegistryCompany[];
+            } finally {
+                clearTimeout(timer);
+            }
+        });
     }
 }
 

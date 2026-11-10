@@ -6,7 +6,6 @@ export type RegistryCompany = {
     canton?: string;
     legalForm?: string;
     registerUrl?: string;
-    purpose?: string;
 };
 
 export type CompanySearchQuery = {

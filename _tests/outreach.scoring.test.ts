@@ -4,6 +4,7 @@ import {preferContactEmail} from "@swissOutreachModule/utilities/adapters/contac
 import {JobParser} from "@swissOutreachModule/utilities/pipeline/jobParser";
 import {generateOutreachEmail, summarizeCompany} from "@swissOutreachModule/utilities/pipeline/emailGenerator";
 import type {LlmPort} from "@swissOutreachModule/utilities/ports";
+import {OUTREACH_OPT_OUT_LINES} from "armonia/src/modules/swissOutreach/prompts/outreachPrompts";
 
 /** A prospect with no public signals at all. */
 const bare: ScoreInput = {emails: [], services: [], campaignCantons: [], languages: [], campaignLanguage: "de", keywords: []};
@@ -27,7 +28,7 @@ function fakeLlm(json: unknown, text: string | Error = "summary"): LlmPort & {ca
 }
 
 const draftInput = {
-    language: "fr",
+    language: "fr" as const,
     emailTone: "professional",
     jobDescription: "Rénovation de deux salles de bains à Genève.",
     companySummary: "Plombier à Genève.",
@@ -140,13 +141,19 @@ describe("job parsing", () => {
 });
 
 describe("outreach email drafts", () => {
-    it("uses the LLM's draft, capping the subject at 300 characters", async () => {
+    it("uses the LLM's draft, capping the subject at 300 characters and ending it with the opt-out sentence", async () => {
         const llm = fakeLlm({subject: "S".repeat(400), body: "Bonjour"});
         const draft = await generateOutreachEmail(llm, draftInput);
-        expect(draft).toEqual({subject: "S".repeat(300), body: "Bonjour"});
-        // The prompt names the recipient and the job
+        expect(draft).toEqual({subject: "S".repeat(300), body: `Bonjour\n\n${OUTREACH_OPT_OUT_LINES.fr}`});
+        // The prompt names the recipient and the job, and hands the writer the opt-out sentence
         expect(llm.calls[0].user).toContain("Recipient company: Plomberie Léman SA");
         expect(llm.calls[0].user).toContain(draftInput.jobDescription);
+        expect(llm.calls[0].user).toContain(OUTREACH_OPT_OUT_LINES.fr);
+    });
+
+    it("does not add the opt-out sentence twice when the writer already ended with it", async () => {
+        const body = `Bonjour\n\n${OUTREACH_OPT_OUT_LINES.fr}`;
+        expect((await generateOutreachEmail(fakeLlm({subject: "Devis", body}), draftInput)).body).toBe(body);
     });
 
     it("falls back to the template in the campaign language when the LLM answer is incomplete", async () => {
@@ -154,16 +161,20 @@ describe("outreach email drafts", () => {
         expect(draft.subject).toBe("Demande de devis – Buyer AG");
         expect(draft.body).toContain("Bonjour Plomberie Léman SA");
         expect(draft.body).toContain(draftInput.jobDescription);
-        expect(draft.body.endsWith("Ada\nada@buyer.ch\n+41 79 000 00 00")).toBe(true);
+        expect(draft.body.endsWith(`Ada\nada@buyer.ch\n+41 79 000 00 00\n\n${OUTREACH_OPT_OUT_LINES.fr}`)).toBe(true);
     });
 
-    it("falls back to the template when the LLM fails, in English for a language without one", async () => {
+    it("falls back to the template in each outreach language when the LLM fails, opt-out sentence included", async () => {
         const failing = fakeLlm(new Error("timeout"));
-        expect((await generateOutreachEmail(failing, {...draftInput, language: "de"})).subject).toBe("Anfrage Offerte – Buyer AG");
-        expect((await generateOutreachEmail(failing, {...draftInput, language: "it"})).subject).toBe("Richiesta di preventivo – Buyer AG");
-        const english = await generateOutreachEmail(failing, {...draftInput, language: "rm", senderPhone: undefined});
+        const german = await generateOutreachEmail(failing, {...draftInput, language: "de"});
+        expect(german.subject).toBe("Anfrage Offerte – Buyer AG");
+        expect(german.body.endsWith(OUTREACH_OPT_OUT_LINES.de)).toBe(true);
+        const italian = await generateOutreachEmail(failing, {...draftInput, language: "it"});
+        expect(italian.subject).toBe("Richiesta di preventivo – Buyer AG");
+        expect(italian.body.endsWith(OUTREACH_OPT_OUT_LINES.it)).toBe(true);
+        const english = await generateOutreachEmail(failing, {...draftInput, language: "en", senderPhone: undefined});
         expect(english.subject).toBe("Quotation request – Buyer AG");
-        expect(english.body.endsWith("Ada\nada@buyer.ch")).toBe(true);
+        expect(english.body.endsWith(`Ada\nada@buyer.ch\n\n${OUTREACH_OPT_OUT_LINES.en}`)).toBe(true);
     });
 
     it("summarizes a company in at most 1200 characters, or from the register data when the LLM fails", async () => {

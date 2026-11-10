@@ -26,13 +26,3 @@ export function incrementMetric(key: keyof SwissOutreachMetricCounters, by = 1):
     counters[key] += by;
     logger.debug(`metric ${key}=${counters[key]}`);
 }
-
-export function getSwissOutreachMetrics(): SwissOutreachMetricCounters {
-    return {...counters};
-}
-
-export function resetSwissOutreachMetricsForTests(): void {
-    for (const key of Object.keys(counters) as (keyof SwissOutreachMetricCounters)[]) {
-        counters[key] = 0;
-    }
-}

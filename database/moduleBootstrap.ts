@@ -3,12 +3,14 @@ import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
+import SuppressedContact from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact";
 
 export const swissOutreachModels: Model<any>[] = [
     Campaign,
     ProspectCompany,
     OutreachEmail,
     PipelineRunLog,
+    SuppressedContact,
 ];
 
 export async function dropSwissOutreachCollections(): Promise<void> {

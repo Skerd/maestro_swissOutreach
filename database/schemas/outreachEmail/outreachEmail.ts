@@ -70,7 +70,14 @@ const OutreachEmailSchema = new Schema<IOutreachEmail>(
         attempts: {type: SchemaTypes.Number, default: 0},
         lastError: {type: SchemaTypes.String, required: false},
     },
-    {accessMode: "loose"},
+    {
+        accessMode: "loose",
+        // Only the campaign pipeline drafts emails
+        permissions: {
+            self: {create: "no-permission"},
+            others: {create: "no-permission"},
+        },
+    },
 );
 
 ownershipPlugin(OutreachEmailSchema);
@@ -84,8 +91,12 @@ normalizeSchemaPermissions(OutreachEmail);
 export default OutreachEmail;
 
 addModelData(OutreachEmail, outreachEmailViews);
+// Server-owned: the pipeline and the review actions set them, never an edit form.
 validateSchemaDefAgainstMongoose(OutreachEmailSchema, OutreachEmailSchemaDef, "SwissOutreachEmail", [
     "company",
+    "campaignId",
+    "prospectCompanyId",
+    "status",
     "messageId",
     "sentAt",
     "attempts",

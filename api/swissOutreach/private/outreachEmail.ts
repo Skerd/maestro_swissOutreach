@@ -11,6 +11,14 @@ import {
 } from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.dto";
 import {OutreachEmailActions} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.actions";
 import {outreachEmailsToSelect} from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.select";
+import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
+import type {OutreachEmailStatusValue} from "armonia/src/modules/swissOutreach/types/constants";
+
+/**
+ * An email still waiting for a decision. An approved email is changed only through `editDraft`, which takes the
+ * approval back; one being sent or sent is history.
+ */
+const EDITABLE: OutreachEmailStatusValue[] = ["draft", "edited", "skipped", "failed"];
 
 export const {router} = createCrudRouter({
     collectionName: "swissoutreachemails",
@@ -24,8 +32,14 @@ export const {router} = createCrudRouter({
     toSelect: outreachEmailsToSelect,
     selectSearchField: "subject",
     defaultSort: {createdAt: -1},
+    // Never reached: the model's create permission is "no-permission" (only the pipeline drafts emails).
     buildCreateData: buildCreateDataFromSchemaDef(OutreachEmailSchemaDef),
-    buildUpdateData: buildUpdateDataFromSchemaDef(OutreachEmailSchemaDef),
-    // approve / skip / editDraft (D86)
+    buildUpdateData: (params, writeFields) => {
+        if (!EDITABLE.includes(params.existing.status)) {
+            throw apiValidationException("email_not_editable", "emailId", null, params.languageCode);
+        }
+        return buildUpdateDataFromSchemaDef(OutreachEmailSchemaDef)(params, writeFields);
+    },
+    // approve / skip / editDraft / doNotContact (D86)
     actions: OutreachEmailActions,
 });

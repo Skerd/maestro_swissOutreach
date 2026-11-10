@@ -15,8 +15,11 @@ import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/camp
 
 type CampaignParams = AuthenticatedMWType & {campaignId: string};
 
-/** A pipeline run can't (re)start from these: it is sending, finished, or cancelled for good. */
-const UNSTARTABLE: CampaignStatusValue[] = ["sending", "completed", "cancelled"];
+/**
+ * A pipeline run (re)starts only from these: never while it runs (parsing → scoring), sends, or once it is completed
+ * or cancelled for good.
+ */
+const STARTABLE: CampaignStatusValue[] = ["draft", "failed", "awaiting_approval"];
 /** Approved emails are sent only once the pipeline has stopped. */
 const SENDABLE: CampaignStatusValue[] = ["awaiting_approval", "completed", "failed"];
 
@@ -34,11 +37,12 @@ export class CampaignActions {
     async start(params: CampaignParams): Promise<{data: CampaignDto}> {
         const campaign = await loadCampaign(params);
         const campaignId = campaign._id.toString();
-        if (UNSTARTABLE.includes(campaign.status) || campaignOrchestrator.isRunning(campaignId)) {
-            throw apiValidationException("campaign_cannot_start", "campaignId", null, params.languageCode);
-        }
-        campaignOrchestrator.enqueue(campaignId, params.company._id.toString());
-        return {data: campaignToDTO(campaign)};
+        // The claim is one compare-and-set write, so two starts (or a start and the create's own run) get one run.
+        const claimed = campaignOrchestrator.isRunning(campaignId)
+            ? null
+            : await campaignOrchestrator.claimAndEnqueue(campaignId, STARTABLE, {company: params.company._id});
+        if (!claimed) throw apiValidationException("campaign_cannot_start", "campaignId", null, params.languageCode);
+        return {data: campaignToDTO(claimed)};
     }
 
     /** Stops the pipeline or a send in progress. */
@@ -83,15 +87,16 @@ export class CampaignActions {
         return {data: campaignToDTO(campaign)};
     }
 
-    /** Sends the approved emails now. */
+    /**
+     * Starts sending the approved emails and answers at once with the campaign `sending`: the send runs in the
+     * background, throttled, and the campaign's stats show its progress. The claim is one compare-and-set write, so a
+     * second send while one runs is refused.
+     */
     @action({auth: "private", rateLimit: {windowMs: 60000, max: 10}, schema: campaignIdFormSchema})
-    async sendApproved(params: CampaignParams): Promise<{data: {campaign: CampaignDto; sent: number; failed: number}}> {
+    async sendApproved(params: CampaignParams): Promise<{data: CampaignDto}> {
         const campaign = await loadCampaign(params);
-        if (!SENDABLE.includes(campaign.status)) {
-            throw apiValidationException("campaign_cannot_send", "campaignId", null, params.languageCode);
-        }
-        const result = await campaignOrchestrator.sendApproved(campaign._id.toString(), false);
-        const refreshed = await campaignService.findById(campaign._id);
-        return {data: {campaign: campaignToDTO(refreshed!), ...result}};
+        const claimed = await campaignOrchestrator.claimAndSend(campaign._id.toString(), SENDABLE, {company: params.company._id});
+        if (!claimed) throw apiValidationException("campaign_cannot_send", "campaignId", null, params.languageCode);
+        return {data: campaignToDTO(claimed)};
     }
 }

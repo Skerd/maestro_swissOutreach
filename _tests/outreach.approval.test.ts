@@ -47,9 +47,17 @@ const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> =>
 const post = (path: string, body: Record<string, unknown>, caller: TestCaller = staff) =>
     request(app).post(`/api/swissOutreach/${path}`).set(callerHeader(caller)).send(body);
 
+/** `sendApproved` answers at once and sends in the background: this waits until the campaign is no longer sending. */
+async function sendAndSettle(campaignId: string) {
+    const response = await post("campaign/sendApproved", {campaignId});
+    await vi.waitFor(async () => expect((await Campaign.findById(campaignId))!.status).not.toBe("sending"), {timeout: 10000, interval: 25});
+    return response;
+}
+
 beforeAll(async () => {
     process.env.SWISS_OUTREACH_REQUEST_DELAY_MS = "0";
     process.env.SWISS_OUTREACH_RETRY_COUNT = "1";
+    process.env.SWISS_OUTREACH_MAX_SENDS_PER_MINUTE = "600";
     await connectTestDatabase();
 }, 120000);
 
@@ -105,9 +113,10 @@ describe("approving one email", {timeout: 30000}, () => {
         expect((await ProspectCompany.findById(prospects[0]._id))!.status).toBe("sent");
         expect((await Campaign.findById(campaign._id))!.stats.approved).toBe(2);
 
-        const sending = await post("campaign/sendApproved", {campaignId: campaign._id.toString()});
-        expect(sending.body.data.sent).toBe(0);
+        const sending = await sendAndSettle(campaign._id.toString());
+        expect(sending.status).toBe(200);
         expect(send).not.toHaveBeenCalled();
+        expect((await Campaign.findById(campaign._id))!.stats.sent).toBe(0);
     }));
 });
 
@@ -205,9 +214,10 @@ describe("approving a whole campaign", {timeout: 30000}, () => {
         const {campaign, emails} = await seedReview(companyId, [{status: "draft", toEmail: "a@one.ch"}, {status: "draft"}]);
         await post("campaign/approveAll", {campaignId: campaign._id.toString()});
 
-        const response = await post("campaign/sendApproved", {campaignId: campaign._id.toString()});
+        const response = await sendAndSettle(campaign._id.toString());
         expect(response.status).toBe(200);
-        expect(response.body.data).toMatchObject({sent: 1, failed: 0, campaign: {status: "completed", stats: {sent: 1, approved: 1}}});
+        expect(response.body.data.status).toBe("sending");
+        expect((await Campaign.findById(campaign._id))!).toMatchObject({status: "completed", stats: {sent: 1, approved: 1}});
         expect(send).toHaveBeenCalledTimes(1);
         expect(send.mock.calls[0][0]).toMatchObject({to: "a@one.ch", companyId: companyId.toString()});
         expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("sent");
@@ -224,31 +234,48 @@ describe("approving a whole campaign", {timeout: 30000}, () => {
         expect(send).not.toHaveBeenCalled();
         for (const status of ["completed", "failed"] as const) {
             const {campaign} = await seedReview(companyId, [{status: "approved", toEmail: "b@one.ch"}], {status});
-            expect((await post("campaign/sendApproved", {campaignId: campaign._id.toString()})).body.data.sent).toBe(1);
+            expect((await sendAndSettle(campaign._id.toString())).status).toBe(200);
+            expect((await Campaign.findById(campaign._id))!.stats.sent).toBe(1);
         }
+        expect(send).toHaveBeenCalledTimes(2);
     }));
 
     it("starts a campaign that can run and refuses one that cannot", () => asCompany(async () => {
         const enqueue = vi.spyOn(campaignOrchestrator, "enqueue").mockImplementation(() => undefined);
-        for (const status of ["sending", "completed", "cancelled"] as const) {
+        // Regression (A8): a campaign mid-pipeline (parsing → scoring) could be started again and ran twice.
+        for (const status of ["parsing", "searching", "enriching", "scoring", "sending", "completed", "cancelled"] as const) {
             const campaign = await createCampaign(companyId, {status});
             const response = await post("campaign/start", {campaignId: campaign._id.toString()});
             expect(response.status).toBe(409);
             expect(response.body.error_code).toBe("campaign_cannot_start");
+            expect((await Campaign.findById(campaign._id))!.status).toBe(status);
         }
         // Already running in this process
-        const running = await createCampaign(companyId, {status: "enriching"});
+        const running = await createCampaign(companyId, {status: "awaiting_approval"});
         const isRunning = vi.spyOn(campaignOrchestrator, "isRunning").mockImplementation((id) => id === running._id.toString());
         expect((await post("campaign/start", {campaignId: running._id.toString()})).body.error_code).toBe("campaign_cannot_start");
         expect(enqueue).not.toHaveBeenCalled();
 
-        for (const status of ["draft", "failed", "awaiting_approval", "searching"] as const) {
+        for (const status of ["draft", "failed", "awaiting_approval"] as const) {
             const campaign = await createCampaign(companyId, {status});
-            expect((await post("campaign/start", {campaignId: campaign._id.toString()})).status).toBe(200);
+            const response = await post("campaign/start", {campaignId: campaign._id.toString()});
+            expect(response.status).toBe(200);
+            // Claimed for the run at once, so a second start sees it running
+            expect(response.body.data.status).toBe("parsing");
+            expect((await Campaign.findById(campaign._id))!.status).toBe("parsing");
             expect(enqueue).toHaveBeenLastCalledWith(campaign._id.toString(), companyId.toString());
         }
-        expect(enqueue).toHaveBeenCalledTimes(4);
+        expect(enqueue).toHaveBeenCalledTimes(3);
         isRunning.mockRestore();
+    }));
+
+    // Regression (A8): two starts at once both passed the status check and ran the pipeline twice.
+    it("runs a campaign once when two starts race", () => asCompany(async () => {
+        const enqueue = vi.spyOn(campaignOrchestrator, "enqueue").mockImplementation(() => undefined);
+        const campaign = await createCampaign(companyId, {status: "awaiting_approval"});
+        const responses = await Promise.all([1, 2].map(() => post("campaign/start", {campaignId: campaign._id.toString()})));
+        expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+        expect(enqueue).toHaveBeenCalledTimes(1);
     }));
 
     it("cancels a campaign", () => asCompany(async () => {
@@ -310,8 +337,8 @@ describe("tenancy", {timeout: 30000}, () => {
             expect(response.status).toBe(404);
             expect(response.body.error_code).toBe("campaign_not_found");
         }
-        const listing = await request(app).get(`/api/swissOutreach/campaign/${campaignId}/emails`).set(callerHeader(outsider));
-        expect(listing.body.error_code).toBe("campaign_not_found");
+        const logs = await post("campaign/logs", {campaignId}, outsider);
+        expect(logs.body.error_code).toBe("campaign_not_found");
 
         expect(send).not.toHaveBeenCalled();
         const stored = await asCompany(() => OutreachEmail.find({campaignId: campaign._id}).sort({_id: 1}));

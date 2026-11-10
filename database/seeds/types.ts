@@ -13,6 +13,8 @@
  * register entries; see `tools/genSwissOutreach.js` in the seed-handoff bundle.
  */
 
+import type {SwissCantonCode} from "armonia/src/modules/swissOutreach/types/constants";
+
 /** A preserved ObjectId hex string. */
 export type PreservedId = string;
 
@@ -42,7 +44,7 @@ export type CampaignSeedRow = {
     jobDescription: string;
     country: string;
     /** Two-letter canton codes; `[]` means "search the whole country". */
-    cantons: string[];
+    cantons: SwissCantonCode[];
     maxCompanies: number;
     /** de | fr | it | en */
     language: string;

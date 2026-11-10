@@ -31,8 +31,8 @@ export class JobParser implements JobParserPort {
                 nogaCategories: parsed.nogaCategories || [],
                 keywords: parsed.keywords,
             };
-        } catch (err: any) {
-            logger.warn(`Job parse LLM failed, using heuristic: ${err?.message || err}`);
+        } catch (err) {
+            logger.warn(`Job parse LLM failed, using heuristic: ${err instanceof Error ? err.message : String(err)}`);
             return heuristicParseJob(jobDescription);
         }
     }

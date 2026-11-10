@@ -23,6 +23,7 @@ export const {router} = createCrudRouter({
     toSelect: prospectCompaniesToSelect,
     selectSearchField: "companyName",
     defaultSort: {score: -1},
+    // Never reached: the model's create permission is "no-permission" (only the pipeline finds prospects).
     buildCreateData: buildCreateDataFromSchemaDef(ProspectCompanySchemaDef),
     buildUpdateData: buildUpdateDataFromSchemaDef(ProspectCompanySchemaDef),
 });

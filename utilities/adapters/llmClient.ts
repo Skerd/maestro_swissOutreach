@@ -1,8 +1,12 @@
 import {getLogger} from "@coreModule/loggers/serverLog";
+import {CircuitBreaker} from "@coreModule/utilities/circuitBreaker";
 import type {LlmPort} from "@swissOutreachModule/utilities/ports";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
 const logger = getLogger("swissOutreach.llm");
+
+/** The LLM failing again and again (down, overloaded) fails the next calls fast; callers fall back to heuristics (BE-09). */
+export const llmCircuitBreaker = new CircuitBreaker({name: "swissOutreach.llm", logger});
 
 function extractJsonObject(text: string): any {
     const trimmed = text.trim();
@@ -23,18 +27,22 @@ export class OpenAiCompatibleLlm implements LlmPort {
 
     async completeText(system: string, user: string): Promise<string> {
         const config = getSwissOutreachConfig();
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
         try {
-            if (config.llmProvider === "ollama" && !config.llmApiKey) {
-                return await this.callOllama(system, user, controller.signal);
-            }
-            return await this.callOpenAi(system, user, controller.signal);
-        } catch (err: any) {
-            logger.warn(`LLM call failed: ${err?.message || err}`);
+            return await llmCircuitBreaker.execute(async () => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+                try {
+                    if (config.llmProvider === "ollama" && !config.llmApiKey) {
+                        return await this.callOllama(system, user, controller.signal);
+                    }
+                    return await this.callOpenAi(system, user, controller.signal);
+                } finally {
+                    clearTimeout(timer);
+                }
+            });
+        } catch (err) {
+            logger.warn(`LLM call failed: ${err instanceof Error ? err.message : String(err)}`);
             throw err;
-        } finally {
-            clearTimeout(timer);
         }
     }
 

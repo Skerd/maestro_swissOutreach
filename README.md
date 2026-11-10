@@ -17,9 +17,10 @@ Discover registered Swiss companies from a job/project description, enrich publi
 ```
 swissOutreach/
 ├── api/swissOutreach/private/     # Express routes (auto-discovered)
-│   ├── campaign.ts                # CRUD + start/cancel/approveAll/sendApproved + nested GETs
-│   ├── prospectCompany.ts         # CRUD
-│   ├── outreachEmail.ts           # CRUD + approve/skip/editDraft
+│   ├── campaign.ts                # CRUD + start/cancel/approveAll/sendApproved + POST /logs
+│   ├── prospectCompany.ts         # list/edit/delete (only the pipeline creates prospects)
+│   ├── outreachEmail.ts           # list/edit/delete + approve/skip/editDraft/doNotContact (only the pipeline creates emails)
+│   ├── suppressedContact.ts       # the company's do-not-contact list (create/list/delete)
 │   └── dashboard.ts               # GET /summary
 ├── database/
 │   ├── moduleBootstrap.ts
@@ -27,6 +28,7 @@ swissOutreach/
 │       ├── campaign/
 │       ├── prospectCompany/
 │       ├── outreachEmail/
+│       ├── suppressedContact/     # Do-not-contact list, checked by every campaign
 │       └── pipelineRunLog/        # Structured step logs (no CRUD router)
 ├── kafka/                         # swissOutreach.pipeline producer + consumer
 ├── utilities/
@@ -37,6 +39,7 @@ swissOutreach/
 │   ├── monitoring/                # In-process counters
 │   ├── mappers/                   # Document → DTO / select
 │   ├── cron/                      # retryStuckCampaigns handler
+│   ├── erasure/                   # person eraser (D57)
 │   └── config.ts                  # Env-backed limits and providers
 └── _tests/                        # Unit + integration + e2e
 ```
@@ -45,16 +48,25 @@ swissOutreach/
 
 Routes are discovered from `api/swissOutreach/private/`. Mounted under `/api/swissOutreach/<file>`.
 
-The campaign and email actions (`start`, `cancel`, `approveAll`, `sendApproved`, `approve`, `skip`, `editDraft`) are `@action` methods in `database/schemas/campaign/campaign.actions.ts` and `database/schemas/outreachEmail/outreachEmail.actions.ts`. Each is its own role permission (`swissoutreachcampaigns[action:<name>]`, `swissoutreachemails[action:<name>]`, D86); admin roles get them. Sent or sending emails cannot be skipped or edited (`email_already_sent`); a campaign sends only from `awaiting_approval`/`completed`/`failed` (`campaign_cannot_send`) and cannot start while running, sending, completed or cancelled (`campaign_cannot_start`) (D85).
+The campaign and email actions (`start`, `cancel`, `approveAll`, `sendApproved`, `approve`, `skip`, `editDraft`, `doNotContact`) are `@action` methods in `database/schemas/campaign/campaign.actions.ts` and `database/schemas/outreachEmail/outreachEmail.actions.ts`. Each is its own role permission (`swissoutreachcampaigns[action:<name>]`, `swissoutreachemails[action:<name>]`, D86); admin roles get them. Sent or sending emails cannot be skipped or edited (`email_already_sent`); a campaign sends only from `awaiting_approval`/`completed`/`failed` (`campaign_cannot_send`) and cannot start while running, sending, completed or cancelled (`campaign_cannot_start`) (D85).
 
 | Route file | Base path | Notable endpoints |
 |------------|-----------|-------------------|
-| `campaign.ts` | `/api/swissOutreach/campaign` | Standard CRUD; `POST /start`, `/cancel`, `/approveAll`, `/sendApproved`; `GET /:campaignId/prospects`, `/emails`, `/logs` |
-| `prospectCompany.ts` | `/api/swissOutreach/prospectCompany` | CRUD (sorted by score) |
-| `outreachEmail.ts` | `/api/swissOutreach/outreachEmail` | CRUD; `POST /approve`, `/skip`, `/editDraft` |
-| `dashboard.ts` | `/api/swissOutreach/dashboard` | `GET /summary` |
+| `campaign.ts` | `/api/swissOutreach/campaign` | Standard CRUD; `POST /start`, `/cancel`, `/approveAll`, `/sendApproved`; `POST /logs` (`{campaignId}`, needs read access to the campaign's `lastError`) |
+| `prospectCompany.ts` | `/api/swissOutreach/prospectCompany` | List (filter `campaignId`, sorted by score), edit, delete; create is `no-permission` |
+| `outreachEmail.ts` | `/api/swissOutreach/outreachEmail` | List (filter `campaignId`), edit of a draft/edited/skipped/failed email (`email_not_editable` otherwise), delete; `POST /approve`, `/skip`, `/editDraft`, `/doNotContact`; create is `no-permission` |
+| `suppressedContact.ts` | `/api/swissOutreach/suppressedContact` | Create (an address, a domain or both, lower-cased), list, delete; entries are not edited |
+| `dashboard.ts` | `/api/swissOutreach/dashboard` | `GET /summary` (the company's own counts only) |
 
-Campaign create sets `status: draft`, seeds empty stats, then `afterCreate` enqueues `CampaignOrchestrator`.
+`status`, `stats`, `parsedJob`, `lastError` (campaign), `status`/`campaignId`/`prospectCompanyId` (email) and `status`/`campaignId`/`dedupeKey` (prospect) are server-owned: no create or edit form writes them.
+
+A campaign's `cantons` are canton codes (`swissCantonCodes` in armonia `types/constants.ts`, picked in a multi-select showing each canton's own name); any other value is refused by the form schema and by the Mongoose enum. None means the whole country.
+
+Campaign create sets `status: draft`, seeds empty stats, then, once the create has committed, claims the run (`draft` → `parsing` in one write) and enqueues `CampaignOrchestrator`. `start` claims the same way from `draft`/`failed`/`awaiting_approval`, so two starts get one run; the stuck-campaign cron re-claims campaigns left 15 minutes in `draft` or a discovery stage. A run that finds its campaign sending, completed or cancelled (a redelivered Kafka event) does nothing.
+
+## Do-not-contact and opt-out
+
+Every drafted email ends with an opt-out sentence in its language (`OUTREACH_OPT_OUT_LINES` in armonia `prompts/outreachPrompts.ts`). A recipient who asks to stop goes on the company's do-not-contact list (`doNotContact` on the email, or the list page); drafting and sending skip listed addresses and domains for every campaign of the company. With `EMAIL_ENABLED` off, a send fails with `outreach_mail_disabled` instead of counting as sent.
 
 ## Pipeline
 
@@ -75,10 +87,11 @@ Status progression: `draft` → `parsing` → `searching` → `enriching` → `s
 
 ## Async execution
 
-1. Campaign create (or `POST /start`) → `CampaignOrchestrator.enqueue`
-2. Publishes Kafka topic `swissOutreach.pipeline` when available (`KAFKA_TOPIC_SWISS_OUTREACH_PIPELINE`)
-3. Otherwise runs in-process
-4. Cron `swissOutreach.retryStuckCampaigns` re-enqueues mid-flight discovery stages (not active sends) after ~15 minutes; reclaims stuck `queued` emails back to `approved`
+1. Campaign create (or `POST /start`) → `CampaignOrchestrator.enqueue`; `POST /sendApproved` claims the campaign (`sending`, one compare-and-set write, so a second send is refused with `campaign_cannot_send`) and answers at once, then `CampaignOrchestrator.enqueueSend` sends in the background
+2. With `SWISS_OUTREACH_USE_KAFKA_PIPELINE=true`, both publish to the Kafka topic `swissOutreach.pipeline` (`KAFKA_TOPIC_SWISS_OUTREACH_PIPELINE`; actions `run` and `send_approved`)
+3. Otherwise, or when the publish fails, they run in-process
+4. Successful sends of a campaign are spaced to at most `SWISS_OUTREACH_MAX_SENDS_PER_MINUTE`; each send writes the campaign (`stats.sent`/`stats.failed`), so the detail page shows the progress. A send that breaks fails the campaign with its error
+5. Cron `swissOutreach.retryStuckCampaigns`, for campaigns untouched for ~15 minutes: re-claims and re-enqueues discovery stages and drafts, puts stuck `queued` emails back to `approved`, and resumes a `sending` campaign (its sender died; each email is claimed atomically, so none is sent twice by the resumed send)
 
 Cancel aborts the in-flight run and un-claims `queued` emails so they are not stranded.
 
@@ -94,20 +107,28 @@ Wired in `utilities/adapters/createPorts.ts`:
 | `LlmPort` | OpenAI-compatible / Ollama |
 | `MailPort` | Documented adapter → core `mailDeliveryService` |
 
-## Configuration (high level)
+## Configuration
 
-| Env | Role |
-|-----|------|
-| `SWISS_OUTREACH_ZEFIX_BASE_URL` | Default `https://www.zefix.ch/ZefixREST/api/v1` (public SPA API) |
-| `SWISS_OUTREACH_ZEFIX_USERNAME` / `PASSWORD` | Optional; only for authenticated ZefixPublicREST |
-| `SWISS_OUTREACH_MAX_COMPANIES_DEFAULT` | Default cap per campaign |
-| `SWISS_OUTREACH_CONCURRENCY` / `REQUEST_DELAY_MS` / `RETRY_COUNT` | Throughput and politeness |
-| `SWISS_OUTREACH_ZEFIX_*` | ZEFIX REST credentials |
-| `SWISS_OUTREACH_WEB_SEARCH_PROVIDER` | `serper` \| `bing` \| `google` \| `none` |
-| `SWISS_OUTREACH_LLM_*` | Provider, base URL, model |
-| `SWISS_OUTREACH_EMAIL_PROVIDER` | `smtp` \| `gmail` \| `microsoft365` |
+Every variable is optional (defaults in `utilities/config.ts`); `environment.validator.ts` checks a set value at boot (D67).
 
-Full list: `utilities/config.ts` and [`docs/swiss-outreach/env.example`](../../../docs/swiss-outreach/env.example).
+| Env | Default | Role |
+|-----|---------|------|
+| `SWISS_OUTREACH_ZEFIX_BASE_URL` | `https://www.zefix.ch/ZefixREST/api/v1` | Public SPA API; the authenticated ZefixPublicREST base when credentials are set |
+| `SWISS_OUTREACH_ZEFIX_USERNAME` / `_PASSWORD` | — | Authenticated ZefixPublicREST; both or neither |
+| `SWISS_OUTREACH_MAX_COMPANIES_DEFAULT` | 50 | Cap per campaign when the form gives none (1–500) |
+| `SWISS_OUTREACH_SEARCH_DEPTH` | 3 | Keywords searched in ZEFIX; pages crawled per site = depth + 2 (1–10) |
+| `SWISS_OUTREACH_CONCURRENCY` | 3 | Prospects enriched at once (1–20) |
+| `SWISS_OUTREACH_REQUEST_DELAY_MS` | 750 | Pause before each crawl request; also the retry back-off unit (0–60000) |
+| `SWISS_OUTREACH_REQUEST_TIMEOUT_MS` | 30000 | Per outbound call (1000–300000) |
+| `SWISS_OUTREACH_RETRY_COUNT` | 3 | Tries per email send (1–10) |
+| `SWISS_OUTREACH_MAX_SENDS_PER_MINUTE` | 10 | Successful sends of one campaign per minute, spaced evenly (1–600) |
+| `SWISS_OUTREACH_USE_KAFKA_PIPELINE` | `false` | Runs and sends through the Kafka topic instead of in-process |
+| `SWISS_OUTREACH_WEB_SEARCH_PROVIDER` | `none` | `serper` \| `bing` \| `google` \| `none`; the chosen provider's key is then required: `SWISS_OUTREACH_SERPER_API_KEY`, `SWISS_OUTREACH_BING_API_KEY`, or `SWISS_OUTREACH_GOOGLE_CSE_API_KEY` + `SWISS_OUTREACH_GOOGLE_CSE_CX` |
+| `SWISS_OUTREACH_LLM_PROVIDER` | `ollama` | `ollama` \| `openai` (any OpenAI-compatible endpoint; no key required) |
+| `SWISS_OUTREACH_LLM_BASE_URL` / `_MODEL` / `_API_KEY` | `AI_ASSISTANT_BASE_URL` / `AI_ASSISTANT_MODEL`, else `http://localhost:11434` / `llama3.1:8b` | LLM endpoint |
+| `SWISS_OUTREACH_EMAIL_PROVIDER` | `smtp` | `smtp` \| `gmail` \| `microsoft365` (`m365`, `office365`): which SMTP profile operators configure; all deliver through core mail |
+
+ZEFIX, each web search provider and the LLM sit behind their own core circuit breaker (`CircuitBreaker`, BE-09): after 5 failures in a minute calls fail fast for 30 s. A crawled site that fails to load twice is not asked for its remaining pages.
 
 ## Database schemas
 
@@ -126,7 +147,7 @@ cd maestro
 npx vitest run modules/swissOutreach
 ```
 
-`outreach.scoring` (scoring, job parsing, drafts), `outreach.pipeline` (orchestrator, sending, cron) and `outreach.approval` (HTTP actions, permissions, tenancy, dashboard) use the fake ports in `outreach.fixtures.ts`; no live provider is called.
+`outreach.scoring` (scoring, job parsing, drafts), `outreach.pipeline` (orchestrator, sending, cron) and `outreach.approval` (HTTP actions, permissions, tenancy, dashboard) use the fake ports in `outreach.fixtures.ts`; no live provider is called. `outreach.resilience` covers the send throttle, the background send, the circuit breakers, the environment validator and the canton codes.
 
 ## Path alias
 

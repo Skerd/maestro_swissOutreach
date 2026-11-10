@@ -1,5 +1,10 @@
 import type {ViewConfig} from "armonia/src/modules/core/api/auxiliary/private/viewConfig";
-import {emailToneValues, outreachLanguageValues} from "armonia/src/modules/swissOutreach/types/constants";
+import {
+    emailToneValues,
+    outreachLanguageValues,
+    swissCantonCodes,
+    swissCantonNames,
+} from "armonia/src/modules/swissOutreach/types/constants";
 
 export const campaignSheetView: ViewConfig = {
     model: "swissoutreachcampaigns",
@@ -50,6 +55,8 @@ export const campaignSheetView: ViewConfig = {
 /** The create form for a Swiss outreach campaign (TD-F06), rendered by the generic create page. */
 const languageOptions = outreachLanguageValues.map((value) => ({value, label: `form.language.${value}`}));
 const emailToneOptions = emailToneValues.map((value) => ({value, label: `form.emailTone.${value}`}));
+/** Proper names, not language keys: a canton is shown by its own name in every UI language. */
+const cantonOptions = swissCantonCodes.map((value) => ({value, label: `${swissCantonNames[value]} (${value})`}));
 
 const campaignCreateFormNodes: ViewConfig["nodes"] = [
     {
@@ -82,10 +89,10 @@ const campaignCreateFormNodes: ViewConfig["nodes"] = [
                 render: "#Field",
                 field: {
                     name: "cantons",
-                    widget: "#StringArrayInput",
+                    widget: "#Select",
                     label: "form.cantonsLabel",
                     placeholder: "form.cantonsPlaceholder",
-                    widgetProps: {removeTooltipKey: "form.removeCanton", maxLength: 2},
+                    widgetProps: {options: cantonOptions, className: "grow w-full", multiple: true},
                 },
             },
             {

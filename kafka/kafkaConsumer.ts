@@ -10,12 +10,13 @@ const logger = getLogger("swissOutreach_kafka_consumer");
 async function processPipelineEvent(event: SwissOutreachPipelineEvent): Promise<void> {
     try {
         if (event.action === "send_approved") {
+            // Sends only while the campaign is still claimed `sending`, so a redelivered event does nothing.
             await campaignOrchestrator.sendApproved(event.campaignId, false);
             return;
         }
         await campaignOrchestrator.run(event.campaignId);
-    } catch (error: any) {
-        logger.err(`Failed swissOutreach pipeline event: ${error?.message || error}`);
+    } catch (error) {
+        logger.err(`Failed swissOutreach pipeline event: ${error instanceof Error ? error.message : String(error)}`);
         throw error;
     }
 }
@@ -39,8 +40,8 @@ export async function startSwissOutreachKafkaConsumers(parentLogger?: serverLogg
             expectedEventType: "swiss_outreach_pipeline",
             processEvent: (d) => processPipelineEvent(d as SwissOutreachPipelineEvent),
         });
-    } catch (err: any) {
-        umbrellaLog.err(`swissOutreach Kafka consumer failed: ${err?.message}`);
+    } catch (err) {
+        umbrellaLog.err(`swissOutreach Kafka consumer failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     umbrellaLog.finish("swissOutreach Kafka consumers startup pass complete");

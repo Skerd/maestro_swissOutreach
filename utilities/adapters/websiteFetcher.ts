@@ -1,4 +1,5 @@
 import {getLogger} from "@coreModule/loggers/serverLog";
+import {CircuitBreaker} from "@coreModule/utilities/circuitBreaker";
 import type {CrawlResult, WebsiteFetchPort, WebSearchPort} from "@swissOutreachModule/utilities/ports";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 import {
@@ -10,12 +11,16 @@ import {
     scoreWebsiteCandidate,
     stripHtml,
 } from "@swissOutreachModule/utilities/adapters/contactExtractor";
-import {assertSafePublicHttpUrl, safeFetchHtml} from "@swissOutreachModule/utilities/adapters/urlSafety";
+import {assertSafePublicHttpUrl, fetchHtml, safeFetchHtml} from "@swissOutreachModule/utilities/adapters/urlSafety";
 import {CampaignCancelledError} from "@swissOutreachModule/utilities/pipeline/cancellation";
 
 const logger = getLogger("swissOutreach.crawler");
 
 const CONTACT_PATHS = ["/", "/contact", "/kontakt", "/about", "/uber-uns", "/ueber-uns", "/impressum", "/team", "/about-us"];
+/** Pages of one site that fail to load before the crawl gives up on the rest of it. */
+const SITE_FAILURES_TO_STOP = 2;
+/** Longer than any crawl of one site, so a site's breaker never half-opens during its crawl. */
+const SITE_BREAKER_SPAN_MS = 10 * 60 * 1000;
 
 function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,8 +68,8 @@ export class HttpWebsiteFetcher implements WebsiteFetchPort {
             try {
                 await assertSafePublicHttpUrl(candidate.url);
                 return {url: candidate.url, confidence: candidate.confidence};
-            } catch (err: any) {
-                logger.debug(`Skipping unsafe website candidate ${candidate.url}: ${err?.message || err}`);
+            } catch (err) {
+                logger.debug(`Skipping unsafe website candidate ${candidate.url}: ${err instanceof Error ? err.message : String(err)}`);
             }
         }
         return {confidence: 0};
@@ -75,8 +80,8 @@ export class HttpWebsiteFetcher implements WebsiteFetchPort {
         let origin: string;
         try {
             origin = (await assertSafePublicHttpUrl(websiteUrl)).origin;
-        } catch (err: any) {
-            logger.warn(`Refusing crawl of unsafe URL ${websiteUrl}: ${err?.message || err}`);
+        } catch (err) {
+            logger.warn(`Refusing crawl of unsafe URL ${websiteUrl}: ${err instanceof Error ? err.message : String(err)}`);
             return {pages: [], emails: [], phones: [], languages: [], services: [], textBlob: ""};
         }
 
@@ -88,13 +93,22 @@ export class HttpWebsiteFetcher implements WebsiteFetchPort {
 
         const pages: {url: string; html: string}[] = [];
         const depth = Math.min(CONTACT_PATHS.length, Math.max(1, config.searchDepth + 2));
+        // A site that is down or timing out is not asked for its remaining pages, each waiting out the timeout (BE-09).
+        const site = new CircuitBreaker({
+            name: `swissOutreach.site ${origin}`,
+            failureThreshold: SITE_FAILURES_TO_STOP,
+            failureWindow: SITE_BREAKER_SPAN_MS,
+            resetTimeout: SITE_BREAKER_SPAN_MS,
+            logger,
+        });
         for (const path of CONTACT_PATHS.slice(0, depth)) {
             if (signal?.aborted) {
                 throw new CampaignCancelledError("crawl");
             }
+            if (site.isOpen()) break;
             const target = new URL(path, origin).toString();
             await delay(config.requestDelayMs);
-            const fetched = await safeFetchHtml(target, config.requestTimeoutMs, 5, signal);
+            const fetched = await site.execute(() => fetchHtml(target, config.requestTimeoutMs, 5, signal)).catch(() => null);
             if (fetched) pages.push({url: fetched.url, html: fetched.html});
         }
 

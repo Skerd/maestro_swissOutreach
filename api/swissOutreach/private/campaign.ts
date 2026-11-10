@@ -1,10 +1,14 @@
 import {Router} from "express";
 import {buildCreateDataFromSchemaDef, buildUpdateDataFromSchemaDef} from "@coreModule/api/buildUpdateDataFromSchemaDef";
-import {createCrudRouter} from "@coreModule/api/crudRouterFactory";
+import {createCrudRouter, type CrudCreateParams} from "@coreModule/api/crudRouterFactory";
 import {createCampaignFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/createCampaign.form.validator";
 import {editCampaignFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/editCampaign.form.validator";
-import {CampaignSchemaDef} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaign.schema-def";
-import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
+import {
+    CampaignSchemaDef,
+    type CreateCampaignFormType,
+    type EditCampaignFormType,
+} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaign.schema-def";
+import Campaign, {type ICampaign} from "@swissOutreachModule/database/schemas/campaign/campaign";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {
     campaignsToDTO,
@@ -13,18 +17,18 @@ import {
 import {CampaignActions} from "@swissOutreachModule/database/schemas/campaign/campaign.actions";
 import {campaignsToSelect} from "@swissOutreachModule/utilities/mappers/campaign/campaignMapper.select";
 import {campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
-import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
-import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
 import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog.service";
-import {prospectCompaniesToDTO} from "@swissOutreachModule/utilities/mappers/prospectCompany/prospectCompanyMapper.dto";
-import {outreachEmailsToDTO} from "@swissOutreachModule/utilities/mappers/outreachEmail/outreachEmailMapper.dto";
-import authMW from "@coreModule/utilities/middlewares/authMW";
+import authMW, {type AuthenticatedMWType} from "@coreModule/utilities/middlewares/authMW";
 import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
+import {validateFormZod} from "@coreModule/utilities/middlewares/validateFormZod";
+import {schemaSanitizer, type SchemaSanitizerMWType} from "@coreModule/utilities/middlewares/schemaSanitizerMW";
+import {runAfterCommit} from "@coreModule/utilities/middlewares/transactionUtils";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
+import {campaignIdFormSchema} from "armonia/src/modules/swissOutreach/api/swissOutreach/private/campaign/campaignAction.form.validator";
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
-const {router: crudRouter} = createCrudRouter({
+const {router: crudRouter} = createCrudRouter<ICampaign, CreateCampaignFormType, EditCampaignFormType>({
     collectionName: "swissoutreachcampaigns",
     model: Campaign,
     service: campaignService,
@@ -37,14 +41,14 @@ const {router: crudRouter} = createCrudRouter({
     selectSearchField: "senderCompanyName",
     selectProjection: "_id senderCompanyName status",
     defaultSort: {createdAt: -1},
-    buildCreateData: (body: any) => {
+    buildCreateData: (params: CrudCreateParams<CreateCampaignFormType>) => {
         const config = getSwissOutreachConfig();
-        const data = buildCreateDataFromSchemaDef(CampaignSchemaDef)(body);
+        const data = buildCreateDataFromSchemaDef(CampaignSchemaDef)(params);
         return {
             ...data,
-            sendAutomatically: Boolean(body.sendAutomatically),
-            maxCompanies: body.maxCompanies || config.maxCompaniesDefault,
-            cantons: Array.isArray(body.cantons) ? body.cantons : [],
+            sendAutomatically: Boolean(params.sendAutomatically),
+            maxCompanies: params.maxCompanies || config.maxCompaniesDefault,
+            cantons: params.cantons ?? [],
             status: "draft",
             stats: {found: 0, enriched: 0, scored: 0, approved: 0, sent: 0, failed: 0},
         };
@@ -52,79 +56,49 @@ const {router: crudRouter} = createCrudRouter({
     buildUpdateData: buildUpdateDataFromSchemaDef(CampaignSchemaDef),
     // start / cancel / approveAll / sendApproved (D86)
     actions: CampaignActions,
-    afterCreate: async (doc: any) => {
-        campaignOrchestrator.enqueue(doc._id.toString(), doc.company?.toString?.() || String(doc.company || ""));
+    // The run reads the campaign outside this transaction, so it starts once the create has committed.
+    afterCreate: async (doc, params) => {
+        await runAfterCommit(params.session, async () => {
+            await campaignOrchestrator.claimAndEnqueue(doc._id.toString(), ["draft"], {company: params.company._id});
+        });
     },
 });
 
 export const router = Router();
 router.use(crudRouter);
 
-router.get(
-    "/:campaignId/prospects",
+/**
+ * The campaign's pipeline activity, newest first. Its prospects and emails are read through their own lists, filtered
+ * by `campaignId`. The log narrates the run and its errors, so it needs read access to the campaign's `lastError`.
+ */
+router.post(
+    "/logs",
     authMW("private"),
     rateLimiter({windowMs: 60000, max: 60}),
-    asyncHandler(async (params: any, routeParams: any) => {
-        const {company, languageCode} = params;
-        const campaignId = routeParams.campaignId;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const prospects = await prospectCompanyService.find(
-            {company: company._id, campaignId: campaign._id},
-            {withDeleted: false},
-            undefined,
-            undefined,
-            {score: -1},
-        );
-        return {data: prospectCompaniesToDTO(prospects)};
-    }),
-);
-
-router.get(
-    "/:campaignId/emails",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 60}),
-    asyncHandler(async (params: any, routeParams: any) => {
-        const {company, languageCode} = params;
-        const campaignId = routeParams.campaignId;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
-        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
-        const emails = await outreachEmailService.find(
-            {company: company._id, campaignId: campaign._id},
-            {withDeleted: false},
-            undefined,
-            undefined,
-            {createdAt: -1},
-        );
-        return {data: outreachEmailsToDTO(emails)};
-    }),
-);
-
-router.get(
-    "/:campaignId/logs",
-    authMW("private"),
-    rateLimiter({windowMs: 60000, max: 60}),
-    asyncHandler(async (params: any, routeParams: any) => {
-        const {company, languageCode} = params;
-        const campaignId = routeParams.campaignId;
-        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode});
+    validateFormZod(campaignIdFormSchema),
+    schemaSanitizer({model: "swissoutreachcampaigns", requiredModes: ["read"]}),
+    asyncHandler(async (params: AuthenticatedMWType & SchemaSanitizerMWType & {campaignId: string}) => {
+        const {company, languageCode, campaignId, sanitizedReadFields} = params;
+        if (!sanitizedReadFields.lastError) {
+            throw apiValidationException("user_permissions_not_sufficient", null, null, languageCode);
+        }
+        const campaign = await campaignService.findOne({_id: campaignId, company: company._id}, {withDeleted: false, languageCode}, undefined, "_id");
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, languageCode);
         const logs = await pipelineRunLogService.find(
             {company: company._id, campaignId: campaign._id},
             {},
             undefined,
-            undefined,
+            "step level message createdAt",
             {createdAt: -1},
             200,
         );
         return {
-            data: logs.map((l: any) => ({
-                _id: l._id.toString(),
-                step: l.step,
-                level: l.level,
-                message: l.message,
-                meta: l.meta,
-                createdAt: l.createdAt,
+            data: logs.map((log) => ({
+                _id: log._id.toString(),
+                step: log.step,
+                level: log.level,
+                message: log.message,
+                createdAt: log.createdAt,
             })),
         };
     }),

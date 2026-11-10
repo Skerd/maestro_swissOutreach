@@ -17,6 +17,8 @@ import {
     campaignStatusValues,
     emailToneValues,
     outreachLanguageValues,
+    swissCantonCodes,
+    type SwissCantonCode,
 } from "armonia/src/modules/swissOutreach/types/constants";
 import type {ParsedJob} from "armonia/src/modules/swissOutreach/types/parsedJob";
 import {applyCampaignIndexes} from "./campaign.indexes";
@@ -38,7 +40,7 @@ export interface ICampaign
         ILifeCyclePluginFields {
     jobDescription: string;
     country: string;
-    cantons: string[];
+    cantons: SwissCantonCode[];
     maxCompanies: number;
     language: (typeof outreachLanguageValues)[number];
     emailTone: (typeof emailToneValues)[number];
@@ -68,7 +70,7 @@ const CampaignSchema = new Schema<ICampaign>(
             trim: true,
             dynamicTableConfiguration: {filterable: true, sortable: true, cellType: COLUMN_TYPE.STRING},
         },
-        cantons: {type: [SchemaTypes.String], default: []},
+        cantons: {type: [{type: SchemaTypes.String, enum: swissCantonCodes}], default: []},
         maxCompanies: {
             type: SchemaTypes.Number,
             required: true,
@@ -125,8 +127,10 @@ normalizeSchemaPermissions(Campaign);
 export default Campaign;
 
 addModelData(Campaign, campaignViews);
+// Server-owned: the pipeline and the campaign actions set them, never a create or edit form.
 validateSchemaDefAgainstMongoose(CampaignSchema, CampaignSchemaDef, "SwissOutreachCampaign", [
     "company",
+    "status",
     "parsedJob",
     "stats",
     "lastError",

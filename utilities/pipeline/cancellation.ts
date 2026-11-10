@@ -1,4 +1,3 @@
-import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 
 const abortControllers = new Map<string, AbortController>();

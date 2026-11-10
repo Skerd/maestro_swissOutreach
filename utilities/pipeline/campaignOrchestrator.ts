@@ -1,4 +1,4 @@
-import {Types} from "mongoose";
+import {Types, type FilterQuery} from "mongoose";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import {nestedEntityToRef} from "@coreModule/utilities/mappers/common.mapper";
 import Campaign, {ICampaign} from "@swissOutreachModule/database/schemas/campaign/campaign";
@@ -37,9 +37,16 @@ import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipel
 import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
+import {suppressedContactService} from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact.service";
+import type {CampaignStatusValue} from "armonia/src/modules/swissOutreach/types/constants";
+import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
+import {CONSTANTS} from "@coreModule/environment";
 const logger = getLogger("swissOutreach.orchestrator");
 
 const running = new Set<string>();
+
+/** A run that reaches one of these (a redelivered Kafka event, a late retry) does nothing: the campaign is past its pipeline. */
+const NOT_RUNNABLE: CampaignStatusValue[] = ["sending", "completed", "cancelled"];
 
 async function logStep(
     companyId: Types.ObjectId | string | ICompany,
@@ -83,6 +90,10 @@ function sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
 }
 
+function errorText(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
 export class CampaignOrchestrator {
     private readonly jobParser: JobParser;
 
@@ -101,6 +112,16 @@ export class CampaignOrchestrator {
         }
     }
 
+    /**
+     * Claims the campaign's run (it must still be in one of `from`, see `CampaignService.claimRun`) and queues it.
+     * Returns the claimed campaign, or null when another trigger got it first or it is no longer in `from`.
+     */
+    async claimAndEnqueue(campaignId: string, from: CampaignStatusValue[], extra: FilterQuery<ICampaign> = {}): Promise<ICampaign | null> {
+        const claimed = await campaignService.claimRun(campaignId, from, extra);
+        if (claimed) this.enqueue(campaignId, claimed.company.toString());
+        return claimed;
+    }
+
     enqueue(campaignId: string, companyId?: string): void {
         if (running.has(campaignId)) return;
         incrementMetric("campaignsStarted");
@@ -114,10 +135,7 @@ export class CampaignOrchestrator {
                 clearCampaignAbort(campaignId);
                 getCampaignAbortSignal(campaignId);
 
-                // Kafka is opt-in. When KAFKA_ENABLED alone is true, publish can succeed while
-                // no consumer processes the event — campaigns stay stuck in `draft`.
-                const useKafkaPipeline = process.env.SWISS_OUTREACH_USE_KAFKA_PIPELINE === "true";
-                if (useKafkaPipeline) {
+                if (getSwissOutreachConfig().useKafkaPipeline) {
                     const published = await publishSwissOutreachPipelineEvent({
                         campaignId,
                         companyId: resolvedCompanyId,
@@ -127,10 +145,45 @@ export class CampaignOrchestrator {
                 }
 
                 await this.run(campaignId);
-            } catch (err: any) {
+            } catch (err) {
                 incrementMetric("pipelineErrors");
-                logger.err(`enqueue failed for ${campaignId}: ${err?.message || err}`);
+                logger.err(`enqueue failed for ${campaignId}: ${errorText(err)}`);
                 await this.run(campaignId);
+            }
+        })();
+    }
+
+    /**
+     * Claims the campaign's send (it must still be in one of `from`, see `CampaignService.claimSend`) and starts it off
+     * the request. Returns the claimed campaign, or null when another send got it first or it is no longer in `from`.
+     */
+    async claimAndSend(campaignId: string, from: CampaignStatusValue[], extra: FilterQuery<ICampaign> = {}): Promise<ICampaign | null> {
+        const claimed = await campaignService.claimSend(campaignId, from, extra);
+        if (claimed) this.enqueueSend(campaignId, claimed.company.toString());
+        return claimed;
+    }
+
+    /**
+     * Sends a claimed campaign's approved emails in the background (BE-10): through the Kafka pipeline when it is on,
+     * else (or when the publish fails) in this process. A send that breaks fails the campaign with its error, so it can
+     * be sent again; emails it left `queued` go back to `approved` with the stuck-campaign cron.
+     */
+    enqueueSend(campaignId: string, companyId: string): void {
+        void (async () => {
+            try {
+                if (getSwissOutreachConfig().useKafkaPipeline) {
+                    const published = await publishSwissOutreachPipelineEvent({campaignId, companyId, action: "send_approved"}).catch((err: unknown) => {
+                        logger.warn(`send_approved publish failed for ${campaignId}, sending in-process: ${errorText(err)}`);
+                        return false;
+                    });
+                    if (published) return;
+                }
+                await this.sendApproved(campaignId);
+            } catch (err) {
+                incrementMetric("pipelineErrors");
+                logger.err(`send failed for ${campaignId}: ${errorText(err)}`);
+                await campaignService.updateOne({_id: campaignId, status: "sending"}, {$set: {status: "failed", lastError: errorText(err)}})
+                    .catch((updateErr: unknown) => logger.err(`could not mark campaign ${campaignId} failed: ${errorText(updateErr)}`));
             }
         })();
     }
@@ -140,7 +193,7 @@ export class CampaignOrchestrator {
         running.add(campaignId);
         const signal = getCampaignAbortSignal(campaignId);
         const campaign = await campaignService.findById(campaignId, {});
-        if (!campaign || campaign.deletedAt || campaign.status === "cancelled") {
+        if (!campaign || campaign.deletedAt || NOT_RUNNABLE.includes(campaign.status)) {
             running.delete(campaignId);
             return;
         }
@@ -168,15 +221,15 @@ export class CampaignOrchestrator {
                 await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "awaiting_approval"}});
                 await logStep(companyId, campaign._id, "approval", "Awaiting human approval");
             }
-        } catch (err: any) {
+        } catch (err) {
             if (err instanceof CampaignCancelledError || (await this.isCancelled(campaignId))) {
                 await campaignService.updateOne({_id: campaignId}, {$set: {status: "cancelled"}});
                 await logStep(companyId, campaignId, "cancel", "Pipeline stopped after cancel", "warn");
                 return;
             }
             incrementMetric("pipelineErrors");
-            await campaignService.updateOne({_id: campaignId, status: {$ne: "cancelled"}}, {$set: {status: "failed", lastError: err?.message || String(err)}});
-            await logStep(companyId, campaign._id, "pipeline", err?.message || String(err), "error");
+            await campaignService.updateOne({_id: campaignId, status: {$ne: "cancelled"}}, {$set: {status: "failed", lastError: errorText(err)}});
+            await logStep(companyId, campaign._id, "pipeline", errorText(err), "error");
         } finally {
             running.delete(campaignId);
             clearCampaignAbort(campaignId);
@@ -246,12 +299,12 @@ export class CampaignOrchestrator {
                         },
                 );
                 created += 1;
-            } catch (err: any) {
+            } catch (err) {
                 await logStep(
                     campaign.company,
                     campaign._id,
                     "company_search",
-                    `Skip duplicate/failed insert ${hit.companyName}: ${err?.message || err}`,
+                    `Skip duplicate/failed insert ${hit.companyName}: ${errorText(err)}`,
                     "warn",
                 );
             }
@@ -339,7 +392,7 @@ export class CampaignOrchestrator {
                 await prospect.save();
                 enriched += 1;
                 scored += 1;
-            } catch (err: any) {
+            } catch (err) {
                 if (err instanceof CampaignCancelledError) throw err;
                 prospect.status = "failed";
                 await prospect.save();
@@ -348,7 +401,7 @@ export class CampaignOrchestrator {
                     campaign.company,
                     campaign._id,
                     "enrich",
-                    `Failed ${prospect.companyName}: ${err?.message || err}`,
+                    `Failed ${prospect.companyName}: ${errorText(err)}`,
                     "warn",
                 );
             }
@@ -372,6 +425,9 @@ export class CampaignOrchestrator {
             campaignId: campaign._id,
             status: {$in: ["scored", "crawled", "website_found"]},
         }, {withDeleted: false}, undefined, undefined, {score: -1});
+        // The company's do-not-contact list covers every campaign: listed addresses are never drafted to.
+        const suppressed = await suppressedContactService.suppressedAmong(campaign.company, prospects.flatMap((prospect) => prospect.emails || []));
+        let suppressedProspects = 0;
 
         for (const prospect of prospects) {
             await throwIfCancelled(campaign._id.toString(), signal);
@@ -385,7 +441,16 @@ export class CampaignOrchestrator {
                 continue;
             }
 
-            const toEmail = preferContactEmail(prospect.emails || []);
+            const addresses = prospect.emails || [];
+            const reachable = addresses.filter((address) => !suppressed.has(address.trim().toLowerCase()));
+            if (addresses.length > 0 && reachable.length === 0) {
+                // Every address it has asked not to be contacted: no draft, and an earlier draft is set aside.
+                suppressedProspects += 1;
+                await prospectCompanyService.updateOne({_id: prospect._id}, {$set: {status: "skipped"}});
+                if (existing) await outreachEmailService.updateOne({_id: existing._id, status: "draft"}, {$set: {status: "skipped"}});
+                continue;
+            }
+            const toEmail = preferContactEmail(reachable);
             const draft = await generateOutreachEmail(this.deps.llm, {
                 language: campaign.language,
                 emailTone: campaign.emailTone,
@@ -424,27 +489,37 @@ export class CampaignOrchestrator {
                 },
             );
         }
-        await logStep(campaign.company, campaign._id, "email_generate", `Drafted emails for ${prospects.length} prospects`);
-        incrementMetric("emailsDrafted", prospects.length);
+        const drafted = prospects.length - suppressedProspects;
+        await logStep(campaign.company, campaign._id, "email_generate", `Drafted emails for ${drafted} prospects${suppressedProspects > 0 ? `; ${suppressedProspects} on the do-not-contact list skipped` : ""}`);
+        incrementMetric("emailsDrafted", drafted);
     }
 
+    /**
+     * Sends the approved emails of a campaign claimed for sending (`claimAndSend`, or the pipeline's automatic send).
+     * Does nothing unless the campaign is `sending`, so a redelivered or late send event finds it finished and stops.
+     * Successful sends are spaced by the configured rate; every send writes the campaign, which shows the progress
+     * and tells the stuck-campaign cron the send is alive.
+     */
     async sendApproved(campaignId: string, autoApproved = false): Promise<{sent: number; failed: number}> {
         const campaign = await campaignService.findById(campaignId, {});
-        if (!campaign) throw new Error("Campaign not found");
-        if (campaign.status === "cancelled") return {sent: 0, failed: 0};
+        if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, CONSTANTS.DEFAULT_LANGUAGE);
+        if (campaign.status !== "sending") return {sent: 0, failed: 0};
         const config = getSwissOutreachConfig();
         // Each send gets the whole retry budget; `attempts` counts every try the email ever had.
         const triesPerSend = Math.max(1, config.retryCount);
+        const sendGapMs = Math.ceil(60000 / config.maxSendsPerMinute);
         const signal = getCampaignAbortSignal(campaignId);
-
-        await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "sending"}});
 
         let sent = 0;
         let failed = 0;
+        let lastSentAt: number | null = null;
         let claimed: IOutreachEmail | null = null;
 
         try {
             while (true) {
+                // Throttle: no email is claimed until the gap after the last successful send has passed.
+                const wait = lastSentAt === null ? 0 : lastSentAt + sendGapMs - Date.now();
+                if (wait > 0) await sleep(wait);
                 await throwIfCancelled(campaignId, signal);
                 const claimFilter = autoApproved
                     ? {
@@ -464,6 +539,16 @@ export class CampaignOrchestrator {
                 const email: IOutreachEmail | null = await outreachEmailService.claimNext(claimFilter);
                 if (!email) break;
                 claimed = email;
+
+                // Checked at send time too: the address may have gone on the list after the email was approved.
+                if ((await suppressedContactService.suppressedAmong(campaign.company, [email.toEmail!])).size > 0) {
+                    email.status = "skipped";
+                    email.lastError = "The recipient is on the do-not-contact list.";
+                    await email.save();
+                    await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "skipped"}});
+                    claimed = null;
+                    continue;
+                }
 
                 let success = false;
                 let lastError = "";
@@ -485,12 +570,14 @@ export class CampaignOrchestrator {
                         email.lastError = undefined;
                         await email.save();
                         await prospectCompanyService.updateOne({_id: email.prospectCompanyId}, {$set: {status: "sent"}});
+                        await campaignService.updateOne({_id: campaign._id}, {$inc: {"stats.sent": 1}});
                         sent += 1;
+                        lastSentAt = Date.now();
                         success = true;
                         incrementMetric("emailsSent");
                         break;
-                    } catch (err: any) {
-                        lastError = err?.message || String(err);
+                    } catch (err) {
+                        lastError = errorText(err);
                         await sleep(config.requestDelayMs * tryNumber);
                     }
                 }
@@ -517,14 +604,13 @@ export class CampaignOrchestrator {
             status: {$in: ["approved", "sent", "queued"]},
         });
         if (await this.isCancelled(campaignId)) {
-            await campaignService.updateOne({_id: campaign._id}, {$set: {"stats.approved": approved}, $inc: {"stats.sent": sent}});
+            await campaignService.updateOne({_id: campaign._id}, {$set: {"stats.approved": approved}});
         } else {
             await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {
                     $set: {
                         status: failed > 0 && sent === 0 ? "failed" : "completed",
                         "stats.approved": approved,
                     },
-                    $inc: {"stats.sent": sent},
                 });
         }
         await logStep(campaign.company, campaign._id, "send", `Sent ${sent}, failed ${failed}`);

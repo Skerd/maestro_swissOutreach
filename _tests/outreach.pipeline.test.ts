@@ -14,6 +14,10 @@ import {CampaignOrchestrator, campaignOrchestrator} from "@swissOutreachModule/u
 import {retryStuckSwissOutreachCampaigns} from "@swissOutreachModule/utilities/cron/retryStuckCampaigns";
 import type {CrawlResult, MailSendRequest, MailSendResult} from "@swissOutreachModule/utilities/ports";
 import {createCampaign, fakePorts, NO_WEBSITE, PLUMBER, PLUMBER_CRAWL, seedReview} from "./outreach.fixtures";
+import {OUTREACH_OPT_OUT_LINES} from "armonia/src/modules/swissOutreach/prompts/outreachPrompts";
+
+/** The fake writer's body, as every draft ends: with the opt-out sentence. */
+const DRAFT_BODY = `Guten Tag\n\n${OUTREACH_OPT_OUT_LINES.de}`;
 
 const companyId = new ObjectId();
 const otherCompanyId = new ObjectId();
@@ -27,6 +31,8 @@ beforeAll(async () => {
     process.env.SWISS_OUTREACH_REQUEST_DELAY_MS = "0";
     process.env.SWISS_OUTREACH_RETRY_COUNT = "2";
     process.env.SWISS_OUTREACH_CONCURRENCY = "1";
+    // The fastest send rate (100 ms apart), so tests with several sends stay quick.
+    process.env.SWISS_OUTREACH_MAX_SENDS_PER_MINUTE = "600";
     await connectTestDatabase();
 }, 120000);
 
@@ -60,7 +66,7 @@ describe("campaign pipeline", {timeout: 30000}, () => {
 
         // One draft per prospect, addressed to the preferred contact address; nothing is sent before approval
         const plumberEmail = await OutreachEmail.findOne({prospectCompanyId: plumber!._id});
-        expect(plumberEmail).toMatchObject({status: "draft", toEmail: "info@test-sanitaer.ch", subject: "Anfrage Offerte", body: "Guten Tag", language: "de", attempts: 0});
+        expect(plumberEmail).toMatchObject({status: "draft", toEmail: "info@test-sanitaer.ch", subject: "Anfrage Offerte", body: DRAFT_BODY, language: "de", attempts: 0});
         const emptyEmail = await OutreachEmail.findOne({prospectCompanyId: empty!._id});
         expect(emptyEmail!.status).toBe("draft");
         expect(emptyEmail!.toEmail).toBeUndefined();
@@ -100,7 +106,7 @@ describe("campaign pipeline", {timeout: 30000}, () => {
 
         expect(send).toHaveBeenCalledTimes(1);
         expect(send.mock.calls[0][0]).toMatchObject({
-            companyId: companyId.toString(), to: "info@test-sanitaer.ch", subject: "Anfrage Offerte", text: "Guten Tag", fromEmail: "ada@buyer.ch", fromName: "Ada",
+            companyId: companyId.toString(), to: "info@test-sanitaer.ch", subject: "Anfrage Offerte", text: DRAFT_BODY, fromEmail: "ada@buyer.ch", fromName: "Ada",
         });
         const stored = await Campaign.findById(campaign._id);
         expect(stored!.status).toBe("completed");
@@ -187,6 +193,7 @@ describe("campaign pipeline", {timeout: 30000}, () => {
     }));
 });
 
+// The send loop runs for a campaign claimed `sending` (the action's claim, or the pipeline's automatic send).
 describe("sending approved emails", {timeout: 30000}, () => {
     it("sends each approved email with an address once, even when two sends race", () => asCompany(async () => {
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
@@ -197,7 +204,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
             {status: "approved", toEmail: "info@one.ch"},
             {status: "draft", toEmail: "info@two.ch"},
             {status: "skipped", toEmail: "info@three.ch"},
-        ]);
+        ], {status: "sending"});
         const orchestrator = new CampaignOrchestrator(fakePorts({mail: {send}}));
 
         const results = await Promise.all([orchestrator.sendApproved(campaign._id.toString()), orchestrator.sendApproved(campaign._id.toString())]);
@@ -216,7 +223,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
     it("retries a failed send within the retry count", () => asCompany(async () => {
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => ({accepted: true, messageId: "m-2"}));
         send.mockRejectedValueOnce(new Error("SMTP busy"));
-        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}], {status: "sending"});
 
         expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 1, failed: 0});
 
@@ -226,7 +233,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
 
     it("marks the email failed after the last retry and fails a campaign that sent nothing", () => asCompany(async () => {
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => { throw new Error("SMTP refused"); });
-        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}], {status: "sending"});
 
         expect(await new CampaignOrchestrator(fakePorts({mail: {send}})).sendApproved(campaign._id.toString())).toEqual({sent: 0, failed: 1});
 
@@ -240,7 +247,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
 
     it("gives an email approved again after failing a fresh retry budget, counting every try", () => asCompany(async () => {
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => { throw new Error("Mailbox full"); });
-        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}], {status: "sending"});
         // Both failed once already with the whole budget (2 tries) used up
         await OutreachEmail.updateMany({campaignId: campaign._id}, {$set: {attempts: 2, lastError: "SMTP refused"}});
         send.mockImplementationOnce(async () => ({accepted: true, messageId: "m-3"}));
@@ -258,7 +265,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
     }));
 
     it("counts what was sent and stops cleanly when the campaign is cancelled mid-send", () => asCompany(async () => {
-        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}, {status: "approved", toEmail: "info@two.ch"}], {status: "sending"});
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
             await Campaign.updateOne({_id: campaign._id}, {$set: {status: "cancelled"}});
             return {accepted: true, messageId: "m-4"};
@@ -275,7 +282,7 @@ describe("sending approved emails", {timeout: 30000}, () => {
     }));
 
     it("hands the email in hand back to approved when cancelled between tries", () => asCompany(async () => {
-        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "info@one.ch"}], {status: "sending"});
         const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
             await Campaign.updateOne({_id: campaign._id}, {$set: {status: "cancelled"}});
             throw new Error("SMTP busy");
@@ -323,18 +330,32 @@ describe("stuck campaign cron", {timeout: 30000}, () => {
         expect((await asOther(() => OutreachEmail.findById(theirs.emails[0]._id)))!.status).toBe("queued");
     });
 
-    it("restarts discovery stages left for 15 minutes, never a send or a finished campaign", () => asCompany(async () => {
+    it("restarts discovery stages and drafts left for 15 minutes, resumes a dead send, never a finished campaign", () => asCompany(async () => {
         const enqueue = vi.spyOn(campaignOrchestrator, "enqueue").mockImplementation(() => undefined);
+        const enqueueSend = vi.spyOn(campaignOrchestrator, "enqueueSend").mockImplementation(() => undefined);
         const stuck = await createCampaign(companyId, {status: "searching"});
         await createCampaign(companyId, {status: "enriching"}); // stuck too, but only a moment ago
+        // Regression (A4): a campaign whose first run never started stayed in draft for good
+        const neverStarted = await createCampaign(companyId);
+        await createCampaign(companyId); // just created: its own run is about to start
         const sending = await createCampaign(companyId, {status: "sending"});
+        await createCampaign(companyId, {status: "sending"}); // its send wrote the campaign a moment ago: alive
         const waiting = await createCampaign(companyId, {status: "awaiting_approval"});
         const failed = await createCampaign(companyId, {status: "failed"});
-        await Campaign.collection.updateMany({_id: {$in: [stuck._id, sending._id, waiting._id, failed._id]}}, {$set: {updatedAt: longAgo()}});
+        await Campaign.collection.updateMany({_id: {$in: [stuck._id, neverStarted._id, sending._id, waiting._id, failed._id]}}, {$set: {updatedAt: longAgo()}});
 
         await retryStuckSwissOutreachCampaigns(companyId);
 
-        expect(enqueue).toHaveBeenCalledTimes(1);
+        expect(enqueue).toHaveBeenCalledTimes(2);
         expect(enqueue).toHaveBeenCalledWith(stuck._id.toString(), companyId.toString());
+        expect(enqueue).toHaveBeenCalledWith(neverStarted._id.toString(), companyId.toString());
+        // Each claimed for its run, so a start or a second sweep does not run it again
+        expect((await Campaign.findById(neverStarted._id))!.status).toBe("parsing");
+        // A send that has not written its campaign for 15 minutes has no sender: it is claimed again and resumed
+        expect(enqueueSend).toHaveBeenCalledTimes(1);
+        expect(enqueueSend).toHaveBeenCalledWith(sending._id.toString(), companyId.toString());
+        await retryStuckSwissOutreachCampaigns(companyId);
+        expect(enqueue).toHaveBeenCalledTimes(2);
+        expect(enqueueSend).toHaveBeenCalledTimes(1);
     }));
 });

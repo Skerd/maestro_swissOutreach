@@ -34,10 +34,3 @@ export class DocumentedMailAdapter implements MailPort {
 export function createMailPort(): MailPort {
     return new DocumentedMailAdapter(resolveMailProviderKind());
 }
-
-/** Suggested SMTP hosts for operator configuration (not auto-connected). */
-export const MAIL_PROVIDER_PRESETS: Record<MailProviderKind, {host: string; port: number; encryption: string}> = {
-    smtp: {host: "localhost", port: 587, encryption: "starttls"},
-    gmail: {host: "smtp.gmail.com", port: 587, encryption: "starttls"},
-    microsoft365: {host: "smtp.office365.com", port: 587, encryption: "starttls"},
-};
