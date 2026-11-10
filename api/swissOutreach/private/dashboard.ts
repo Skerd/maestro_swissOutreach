@@ -4,6 +4,14 @@ import {rateLimiter} from "@coreModule/utilities/middlewares/rateLimiter";
 import {asyncHandler} from "@coreModule/utilities/middlewares/asyncHandler";
 import {validateFormZod} from "@coreModule/utilities/middlewares/validateFormZod";
 import {ObjectId} from "mongodb";
+import type {Model} from "mongoose";
+import SchemaGuard from "@coreModule/database/security/schemaGuard";
+import {getModelCollectedData} from "@coreModule/database/collections";
+import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
+import type {UserContext} from "@coreModule/utilities/types/types";
+import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
+import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
+import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
 import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
@@ -15,6 +23,11 @@ import {
 
 export const router = Router();
 
+/** The fields of `collectionName` the caller may read (SEC-09); throws when there are none. */
+function readableFields<T>(model: Model<T>, collectionName: string, actionUserCtx: UserContext, languageCode: string) {
+    return SchemaGuard.sanitizeFields(model, getModelCollectedData(collectionName).readFields ?? {}, "read", actionUserCtx, languageCode);
+}
+
 /** The company's outreach counts, or one campaign's when `campaignId` is given. */
 router.post(
     "/summary",
@@ -22,7 +35,14 @@ router.post(
     rateLimiter({windowMs: 60000, max: 60}),
     validateFormZod(dashboardSummaryFormSchema),
     asyncHandler(async (params: AuthenticatedMWType & DashboardSummaryFormType) => {
-        const {company, campaignId} = params;
+        const {company, campaignId, actionUserCtx, languageCode} = params;
+        // Every figure counts by status (and the average reads the score): the caller must be able to read them (SEC-09).
+        const campaignFields = readableFields(Campaign, "swissoutreachcampaigns", actionUserCtx, languageCode);
+        const prospectFields = readableFields(ProspectCompany, "swissoutreachprospectcompanies", actionUserCtx, languageCode);
+        const emailFields = readableFields(OutreachEmail, "swissoutreachemails", actionUserCtx, languageCode);
+        if (!campaignFields.status || !prospectFields.status || !prospectFields.score || !emailFields.status) {
+            throw apiValidationException("user_permissions_not_sufficient", null, null, languageCode);
+        }
         const companyId = company._id;
         const campaign = campaignId ? new ObjectId(campaignId) : undefined;
         // Campaigns are matched by their id, their prospects and emails by `campaignId`.

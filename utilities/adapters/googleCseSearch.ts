@@ -2,6 +2,7 @@ import type {WebSearchPort, WebSearchResult} from "@swissOutreachModule/utilitie
 import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import {CircuitBreaker} from "@coreModule/utilities/circuitBreaker";
+import {toSearchResults} from "@swissOutreachModule/utilities/adapters/webSearch";
 
 const logger = getLogger("swissOutreach.googleCse");
 
@@ -29,13 +30,8 @@ export class GoogleCseWebSearch implements WebSearchPort {
                 url.searchParams.set("num", String(Math.min(10, limit)));
                 const response = await fetch(url.toString(), {signal: controller.signal});
                 if (!response.ok) throw new Error(`Google CSE HTTP ${response.status}`);
-                const json = await response.json();
-                const items = Array.isArray(json?.items) ? json.items : [];
-                return items.slice(0, limit).map((r: any) => ({
-                    title: String(r.title || ""),
-                    url: String(r.link || ""),
-                    snippet: r.snippet ? String(r.snippet) : undefined,
-                }));
+                const json: {items?: unknown} | null = await response.json();
+                return toSearchResults(json?.items, limit);
             } finally {
                 clearTimeout(timer);
             }

@@ -1,4 +1,5 @@
 import {getLogger, serverLogger} from "@coreModule/loggers/serverLog";
+import type {ICompany} from "@coreModule/database/schemas/company/company";
 import {createCampaigns} from "@swissOutreachModule/database/schemas/campaign/campaign.defaults";
 import {createProspectCompanies} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.defaults";
 import {createOutreachEmails} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.defaults";
@@ -13,7 +14,7 @@ export const companyDemoSeedOrder = 70;
  * Strictly ordered — prospects reference their campaign, e-mails reference both.
  * `pipelineRunLog` is deliberately not seeded; it is a runtime trace.
  */
-export async function seedCompanyDemoData(parentLogger: serverLogger | undefined, company: any): Promise<void> {
+export async function seedCompanyDemoData(parentLogger: serverLogger | undefined, company: ICompany): Promise<void> {
     const logger = getLogger("swissOutreach_company_demo_seed", parentLogger);
     logger.start("Seeding Swiss outreach demo data...");
 

@@ -52,7 +52,8 @@ export interface WebsiteFetchPort {
 }
 
 export interface LlmPort {
-    completeJson<T>(system: string, user: string): Promise<T>;
+    /** The JSON the model answered, unchecked: the caller narrows it to the shape it asked for. */
+    completeJson(system: string, user: string): Promise<unknown>;
     completeText(system: string, user: string): Promise<string>;
 }
 

@@ -5,6 +5,26 @@ import {getSwissOutreachConfig} from "@swissOutreachModule/utilities/config";
 
 const logger = getLogger("swissOutreach.webSearch");
 
+/** The fields of a search provider's result item the adapters read; a provider may leave any of them out. */
+export type ProviderSearchItem = {title?: unknown; name?: unknown; link?: unknown; url?: unknown; snippet?: unknown};
+type SerperResponse = {organic?: unknown};
+type BingResponse = {webPages?: {value?: unknown}};
+
+const textOf = (value: unknown): string | undefined => (typeof value === "string" && value ? value : undefined);
+
+/** A provider's result list as search results: Serper and Google name the URL `link`, Bing `url` and its title `name`. */
+export function toSearchResults(items: unknown, limit: number): WebSearchResult[] {
+    if (!Array.isArray(items)) return [];
+    return items
+        .filter((item): item is ProviderSearchItem => typeof item === "object" && item !== null)
+        .slice(0, limit)
+        .map((item) => ({
+            title: textOf(item.title) ?? textOf(item.name) ?? "",
+            url: textOf(item.link) ?? textOf(item.url) ?? "",
+            snippet: textOf(item.snippet),
+        }));
+}
+
 /** One breaker per provider: a provider that keeps failing fails the next searches fast (BE-09). */
 export const serperCircuitBreaker = new CircuitBreaker({name: "swissOutreach.serper", logger});
 export const bingCircuitBreaker = new CircuitBreaker({name: "swissOutreach.bing", logger});
@@ -30,13 +50,8 @@ export class SerperWebSearch implements WebSearchPort {
                     signal: controller.signal,
                 });
                 if (!response.ok) throw new Error(`Serper HTTP ${response.status}`);
-                const json = await response.json();
-                const organic = Array.isArray(json?.organic) ? json.organic : [];
-                return organic.slice(0, limit).map((r: any) => ({
-                    title: String(r.title || ""),
-                    url: String(r.link || ""),
-                    snippet: r.snippet ? String(r.snippet) : undefined,
-                }));
+                const json: SerperResponse | null = await response.json();
+                return toSearchResults(json?.organic, limit);
             } finally {
                 clearTimeout(timer);
             }
@@ -63,13 +78,8 @@ export class BingWebSearch implements WebSearchPort {
                     signal: controller.signal,
                 });
                 if (!response.ok) throw new Error(`Bing HTTP ${response.status}`);
-                const json = await response.json();
-                const pages = Array.isArray(json?.webPages?.value) ? json.webPages.value : [];
-                return pages.slice(0, limit).map((r: any) => ({
-                    title: String(r.name || ""),
-                    url: String(r.url || ""),
-                    snippet: r.snippet ? String(r.snippet) : undefined,
-                }));
+                const json: BingResponse | null = await response.json();
+                return toSearchResults(json?.webPages?.value, limit);
             } finally {
                 clearTimeout(timer);
             }

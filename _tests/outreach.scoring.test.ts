@@ -14,10 +14,10 @@ function fakeLlm(json: unknown, text: string | Error = "summary"): LlmPort & {ca
     const calls: {system: string; user: string}[] = [];
     return {
         calls,
-        async completeJson<T>(system: string, user: string): Promise<T> {
+        async completeJson(system: string, user: string): Promise<unknown> {
             calls.push({system, user});
             if (json instanceof Error) throw json;
-            return json as T;
+            return json;
         },
         async completeText(system: string, user: string): Promise<string> {
             calls.push({system, user});
@@ -121,6 +121,15 @@ describe("job parsing", () => {
         expect(await new JobParser(fakeLlm(new Error("LLM down"))).parse(job, "en")).toEqual(expected);
     });
 
+    // TD-B144: the model's JSON is unchecked input; only text lists and text survive
+    it("keeps only the text of a malformed answer, and falls back when no keyword is text", async () => {
+        const job = "Bathroom renovation with a new electrical installation";
+        expect(await new JobParser(fakeLlm({keywords: "Sanitär"})).parse(job, "en")).toEqual(heuristicParseJob(job));
+        expect(await new JobParser(fakeLlm(["Sanitär"])).parse(job, "en")).toEqual(heuristicParseJob(job));
+        const parsed = await new JobParser(fakeLlm({industry: 7, keywords: ["Sanitär", 3, "", null], synonyms: "Bad"})).parse(job, "de");
+        expect(parsed).toMatchObject({industry: "Unknown", keywords: ["Sanitär"], synonyms: []});
+    });
+
     it("the heuristic maps trades to keywords in the four languages", () => {
         const parsed = heuristicParseJob("Bathroom renovation with a new electrical installation");
         expect(parsed.industry).toBe("plumbing");
@@ -159,6 +168,7 @@ describe("outreach email drafts", () => {
     it("falls back to the template in the campaign language when the LLM answer is incomplete", async () => {
         const draft = await generateOutreachEmail(fakeLlm({subject: "Only a subject"}), draftInput);
         expect(draft.subject).toBe("Demande de devis – Buyer AG");
+        expect((await generateOutreachEmail(fakeLlm({subject: 5, body: "Bonjour"}), draftInput)).subject).toBe("Demande de devis – Buyer AG");
         expect(draft.body).toContain("Bonjour Plomberie Léman SA");
         expect(draft.body).toContain(draftInput.jobDescription);
         expect(draft.body.endsWith(`Ada\nada@buyer.ch\n+41 79 000 00 00\n\n${OUTREACH_OPT_OUT_LINES.fr}`)).toBe(true);

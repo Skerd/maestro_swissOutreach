@@ -1,3 +1,5 @@
+import {randomUUID} from "crypto";
+import {hostname} from "os";
 import {Types, type FilterQuery} from "mongoose";
 import {getLogger} from "@coreModule/loggers/serverLog";
 import {nestedEntityToRef} from "@coreModule/utilities/mappers/common.mapper";
@@ -35,18 +37,23 @@ import {mapWithConcurrency} from "@coreModule/utilities/helpers/mapWithConcurren
 
 import {pipelineRunLogService} from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog.service";
 import {outreachEmailService} from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail.service";
-import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
+import {CAMPAIGN_LEASE_MS, campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import {prospectCompanyService} from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany.service";
 import {DO_NOT_CONTACT_SKIP_REASON, suppressedContactService} from "@swissOutreachModule/database/schemas/suppressedContact/suppressedContact.service";
-import type {CampaignStatusValue} from "armonia/src/modules/swissOutreach/types/constants";
+import type {CampaignStatusValue, OutreachEmailErrorCode} from "armonia/src/modules/swissOutreach/types/constants";
+import {ServerError} from "armonia/src/modules/core/types";
 import {apiValidationException} from "armonia/src/modules/core/helpers/exceptions";
 import {CONSTANTS} from "@coreModule/environment";
 const logger = getLogger("swissOutreach.orchestrator");
 
 const running = new Set<string>();
 
-/** A run that reaches one of these (a redelivered Kafka event, a late retry) does nothing: the campaign is past its pipeline. */
-const NOT_RUNNABLE: CampaignStatusValue[] = ["sending", "completed", "cancelled"];
+/**
+ * A run that reaches one of these (a redelivered Kafka event, a late retry) does nothing: the campaign is past its
+ * pipeline. `awaiting_approval` holds drafts a person may be reviewing; every deliberate restart (start, the stuck-run
+ * cron) claims the campaign into `parsing` first (`claimAndEnqueue`), so it still runs (TD-B169).
+ */
+const NOT_RUNNABLE: CampaignStatusValue[] = ["sending", "completed", "cancelled", "awaiting_approval"];
 
 async function logStep(
     companyId: Types.ObjectId | string | ICompany,
@@ -94,11 +101,60 @@ function errorText(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * What a failed send stores in the email's `lastError`: a known reason as its code (translated by the panel, D126),
+ * any other error as the provider's own text.
+ */
+function sendFailureReason(err: unknown): string {
+    if (err instanceof ServerError && err.error_code === "outreach_mail_disabled") return "mail_disabled" satisfies OutreachEmailErrorCode;
+    return errorText(err);
+}
+
+/** How long a campaign lease lasts, and how often its holder renews it while it works. */
+export type CampaignLeaseTiming = {leaseMs: number; renewEveryMs: number};
+
+const DEFAULT_LEASE_TIMING: CampaignLeaseTiming = {leaseMs: CAMPAIGN_LEASE_MS, renewEveryMs: CAMPAIGN_LEASE_MS / 5};
+
+/** A campaign lease this process holds; `lost` once another worker took it after it ran out. */
+type HeldLease = {lost: boolean; release(): Promise<void>};
+
 export class CampaignOrchestrator {
     private readonly jobParser: JobParser;
 
-    constructor(private readonly deps: OrchestratorDeps = createDefaultOrchestratorDeps()) {
+    constructor(
+        private readonly deps: OrchestratorDeps = createDefaultOrchestratorDeps(),
+        private readonly leaseTiming: CampaignLeaseTiming = DEFAULT_LEASE_TIMING,
+    ) {
         this.jobParser = new JobParser(deps.llm);
+    }
+
+    /**
+     * Takes the campaign's lease (TD-B128) while it matches `filter`, and renews it on a timer until released, so a
+     * worker that is slow but alive (a hung SMTP socket, a long enrichment) is never taken over. Null when another
+     * worker, in this process or another (a redelivered Kafka event), holds it. A worker whose lease ran out and was
+     * taken stops at its next cancellation check without writing the campaign's status.
+     */
+    private async takeLease(campaignId: string, filter: FilterQuery<ICampaign>): Promise<HeldLease | null> {
+        const holder = `${hostname()}:${process.pid}:${randomUUID()}`;
+        const {leaseMs, renewEveryMs} = this.leaseTiming;
+        if (!(await campaignService.acquireLease(campaignId, holder, leaseMs, filter))) return null;
+
+        const lease: HeldLease = {lost: false, release: async () => undefined};
+        const timer = setInterval(() => {
+            campaignService.renewLease(campaignId, holder, leaseMs).then((held) => {
+                if (held || lease.lost) return;
+                lease.lost = true;
+                clearInterval(timer);
+                logger.warn(`[campaign=${campaignId}] lease taken over by another worker; stopping this one`);
+                abortCampaign(campaignId);
+            }).catch((err: unknown) => logger.warn(`[campaign=${campaignId}] lease renewal failed: ${errorText(err)}`));
+        }, renewEveryMs);
+        timer.unref();
+        lease.release = async () => {
+            clearInterval(timer);
+            if (!lease.lost) await campaignService.releaseLease(campaignId, holder);
+        };
+        return lease;
     }
 
     async cancel(campaignId: string): Promise<void> {
@@ -198,6 +254,13 @@ export class CampaignOrchestrator {
             return;
         }
         const companyId = campaign.company;
+        // Only the lease holder runs it: a second process given the same run (a redelivered event) stops here.
+        const lease = await this.takeLease(campaignId, {status: {$nin: NOT_RUNNABLE}});
+        if (!lease) {
+            running.delete(campaignId);
+            logger.info(`[campaign=${campaignId}] run skipped: another worker holds the campaign`);
+            return;
+        }
         try {
             await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "parsing", lastError: undefined}});
             await logStep(
@@ -216,12 +279,16 @@ export class CampaignOrchestrator {
 
             if (campaign.sendAutomatically) {
                 await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "sending"}});
-                await this.sendApproved(campaign._id.toString(), true);
+                await this.sendHeld(campaignId, true, lease);
             } else {
                 await campaignService.updateOne({_id: campaign._id, status: {$ne: "cancelled"}}, {$set: {status: "awaiting_approval"}});
                 await logStep(companyId, campaign._id, "approval", "Awaiting human approval");
             }
         } catch (err) {
+            if (lease.lost) {
+                await logStep(companyId, campaignId, "pipeline", "Stopped: the run was taken over after its lease ran out", "warn");
+                return;
+            }
             if (err instanceof CampaignCancelledError || (await this.isCancelled(campaignId))) {
                 await campaignService.updateOne({_id: campaignId}, {$set: {status: "cancelled"}});
                 await logStep(companyId, campaignId, "cancel", "Pipeline stopped after cancel", "warn");
@@ -231,6 +298,7 @@ export class CampaignOrchestrator {
             await campaignService.updateOne({_id: campaignId, status: {$ne: "cancelled"}}, {$set: {status: "failed", lastError: errorText(err)}});
             await logStep(companyId, campaign._id, "pipeline", errorText(err), "error");
         } finally {
+            await lease.release();
             running.delete(campaignId);
             clearCampaignAbort(campaignId);
         }
@@ -497,13 +565,26 @@ export class CampaignOrchestrator {
     /**
      * Sends the approved emails of a campaign claimed for sending (`claimAndSend`, or the pipeline's automatic send).
      * Does nothing unless the campaign is `sending`, so a redelivered or late send event finds it finished and stops.
-     * Successful sends are spaced by the configured rate; every send writes the campaign, which shows the progress
-     * and tells the stuck-campaign cron the send is alive.
+     * Only the holder of the campaign's lease sends, so a second sender (a redelivered event, the stuck-campaign cron)
+     * finds it held and does nothing. Successful sends are spaced by the configured rate.
      */
     async sendApproved(campaignId: string, autoApproved = false): Promise<{sent: number; failed: number}> {
         const campaign = await campaignService.findById(campaignId, {});
         if (!campaign) throw apiValidationException("campaign_not_found", "campaignId", null, CONSTANTS.DEFAULT_LANGUAGE);
         if (campaign.status !== "sending") return {sent: 0, failed: 0};
+        const lease = await this.takeLease(campaignId, {status: "sending"});
+        if (!lease) return {sent: 0, failed: 0};
+        try {
+            return await this.sendHeld(campaignId, autoApproved, lease);
+        } finally {
+            await lease.release();
+        }
+    }
+
+    /** The send loop of a campaign whose lease this worker holds. */
+    private async sendHeld(campaignId: string, autoApproved: boolean, lease: HeldLease): Promise<{sent: number; failed: number}> {
+        const campaign = await campaignService.findById(campaignId, {});
+        if (!campaign || campaign.status !== "sending") return {sent: 0, failed: 0};
         const config = getSwissOutreachConfig();
         // Each send gets the whole retry budget; `attempts` counts every try the email ever had.
         const triesPerSend = Math.max(1, config.retryCount);
@@ -577,7 +658,7 @@ export class CampaignOrchestrator {
                         incrementMetric("emailsSent");
                         break;
                     } catch (err) {
-                        lastError = errorText(err);
+                        lastError = sendFailureReason(err);
                         await sleep(config.requestDelayMs * tryNumber);
                     }
                 }
@@ -593,10 +674,14 @@ export class CampaignOrchestrator {
             }
         } catch (err) {
             if (!(err instanceof CampaignCancelledError)) throw err;
-            // Cancelled mid-send: the email in hand goes back to approved, and what was sent is still counted.
+            // Cancelled, or taken over, mid-send: the email in hand goes back to approved, and what was sent is still counted.
             if (claimed) {
                 await outreachEmailService.updateOne({_id: claimed._id, status: "queued"}, {$set: {status: "approved"}});
             }
+        }
+        if (lease.lost) {
+            await logStep(campaign.company, campaign._id, "send", `Stopped after ${sent} sent: the send was taken over after its lease ran out`, "warn");
+            return {sent, failed};
         }
 
         const approved = await outreachEmailService.count({

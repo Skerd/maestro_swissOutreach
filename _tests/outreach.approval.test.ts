@@ -39,8 +39,8 @@ const app = appFor([
     {basePath: "/api/swissOutreach/dashboard", router: dashboardRoute.router, module: "swissOutreach"},
 ]);
 
-/** Every campaign and email permission, the seven actions included (D86). */
-const staff: TestCaller = {userId: new ObjectId().toString(), companyId: companyId.toString(), isAdmin: true, permissions: allPermissionTags([Campaign, OutreachEmail])};
+/** Every campaign, prospect and email permission, the seven actions included (D86). */
+const staff: TestCaller = {userId: new ObjectId().toString(), companyId: companyId.toString(), isAdmin: true, permissions: allPermissionTags([Campaign, OutreachEmail, ProspectCompany])};
 const outsider: TestCaller = {...staff, companyId: otherCompanyId.toString()};
 /** May edit campaigns and emails, but holds none of their actions. */
 const editor: TestCaller = {...staff, permissions: staff.permissions!.filter((tag) => !tag.includes("[action:"))};
@@ -463,5 +463,15 @@ describe("dashboard summary", {timeout: 30000}, () => {
             campaignsActive: 1,
         });
         expect((await post("dashboard/summary", {campaignId: "not-an-id"})).body.error_code).toBe("form_not_correct");
+    });
+
+    // TD-B146: the counts are read field by field like any list (SEC-09)
+    it("refuses a caller who may not read the prospects' status and score", async () => {
+        const prospectReadTags = allPermissionTags([ProspectCompany]);
+        const noProspects: TestCaller = {...staff, permissions: staff.permissions!.filter((tag) => !prospectReadTags.includes(tag))};
+
+        const response = await post("dashboard/summary", {}, noProspects);
+        expect(response.status).toBe(403);
+        expect(response.body.error_code).toBe("user_permissions_not_sufficient");
     });
 });

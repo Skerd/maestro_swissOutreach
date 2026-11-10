@@ -176,10 +176,32 @@ function decodedBody(response: http.IncomingMessage): Readable {
     return decoder;
 }
 
-type PageResponse = {status: number; location?: string; html?: string};
+/** The crawler's product token, which robots.txt groups name in their `User-agent` lines. */
+export const CRAWLER_PRODUCT_TOKEN = "ArpeggioSwissOutreachBot";
 
-/** One GET through the pinned resolver; the body is read only for an HTML page, and at most {@link MAX_HTML_BYTES}. */
-function requestPage(url: URL, signal: AbortSignal): Promise<PageResponse> {
+/** The most of a robots.txt that is read: the size RFC 9309 asks crawlers to parse at least. */
+export const MAX_ROBOTS_TXT_BYTES = 500 * 1024;
+
+/** What a GET reads the body of: an HTML page, or a plain-text file such as robots.txt. */
+type BodyKind = {accept: string; isWanted: (contentType: string) => boolean; maxBytes: number};
+
+const HTML_BODY: BodyKind = {
+    accept: "text/html,application/xhtml+xml",
+    isWanted: (contentType) => contentType.includes("text/html") || contentType.includes("application/xhtml"),
+    maxBytes: MAX_HTML_BYTES,
+};
+
+// A robots.txt served without a content type is still a robots.txt; an HTML page in its place (a soft 404) is not.
+const TEXT_BODY: BodyKind = {
+    accept: "text/plain",
+    isWanted: (contentType) => contentType === "" || contentType.includes("text/plain"),
+    maxBytes: MAX_ROBOTS_TXT_BYTES,
+};
+
+type PageResponse = {status: number; location?: string; body?: string};
+
+/** One GET through the pinned resolver; the body is read only when it is of the wanted kind, and only up to its cap. */
+function requestPage(url: URL, signal: AbortSignal, kind: BodyKind): Promise<PageResponse> {
     const client = url.protocol === "https:" ? https : http;
     return new Promise((resolve, reject) => {
         const request = client.request(url, {
@@ -187,24 +209,57 @@ function requestPage(url: URL, signal: AbortSignal): Promise<PageResponse> {
             lookup: publicOnlyLookup,
             signal,
             headers: {
-                "User-Agent": "ArpeggioSwissOutreachBot/1.0 (+https://arpeggio.local; respectful crawler)",
-                Accept: "text/html,application/xhtml+xml",
+                "User-Agent": `${CRAWLER_PRODUCT_TOKEN}/1.0 (+https://arpeggio.local; respectful crawler)`,
+                Accept: kind.accept,
                 "Accept-Encoding": "gzip, deflate, br",
             },
         }, (response) => {
             const status = response.statusCode ?? 0;
-            const contentType = String(response.headers["content-type"] || "");
-            const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml");
-            if (status < 200 || status >= 300 || !isHtml) {
+            const contentType = String(response.headers["content-type"] || "").toLowerCase();
+            if (status < 200 || status >= 300 || !kind.isWanted(contentType)) {
                 response.resume();
                 resolve({status, location: response.headers.location});
                 return;
             }
-            readCapped(decodedBody(response), MAX_HTML_BYTES).then((body) => resolve({status, html: body.toString("utf8")}), reject);
+            readCapped(decodedBody(response), kind.maxBytes).then((body) => resolve({status, body: body.toString("utf8")}), reject);
         });
         request.on("error", reject);
         request.end();
     });
+}
+
+/**
+ * GET with manual redirect following and SSRF checks on each hop. Null for a redirect without a target or too many;
+ * a failure to reach the URL (refused, reset, timed out, a hop to a blocked address) throws.
+ */
+async function fetchFollowingRedirects(
+    rawUrl: string,
+    timeoutMs: number,
+    maxRedirects: number,
+    externalSignal: AbortSignal | undefined,
+    kind: BodyKind,
+): Promise<{url: string; page: PageResponse} | null> {
+    let current = rawUrl;
+    for (let hop = 0; hop <= maxRedirects; hop++) {
+        const safeUrl = await assertSafePublicHttpUrl(current);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const onAbort = () => controller.abort();
+        externalSignal?.addEventListener("abort", onAbort);
+        try {
+            const page = await requestPage(safeUrl, controller.signal, kind);
+            if (REDIRECT_STATUSES.includes(page.status)) {
+                if (!page.location) return null;
+                current = new URL(page.location, safeUrl).toString();
+                continue;
+            }
+            return {url: safeUrl.toString(), page};
+        } finally {
+            clearTimeout(timer);
+            externalSignal?.removeEventListener("abort", onAbort);
+        }
+    }
+    return null;
 }
 
 /**
@@ -218,35 +273,25 @@ export async function fetchHtml(
     maxRedirects = 5,
     externalSignal?: AbortSignal,
 ): Promise<{url: string; html: string} | null> {
-    let current = rawUrl;
-    for (let hop = 0; hop <= maxRedirects; hop++) {
-        const safeUrl = await assertSafePublicHttpUrl(current);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeoutMs);
-        const onAbort = () => controller.abort();
-        externalSignal?.addEventListener("abort", onAbort);
-        try {
-            const page = await requestPage(safeUrl, controller.signal);
-            if (REDIRECT_STATUSES.includes(page.status)) {
-                if (!page.location) return null;
-                current = new URL(page.location, safeUrl).toString();
-                continue;
-            }
-            return page.html === undefined ? null : {url: safeUrl.toString(), html: page.html};
-        } finally {
-            clearTimeout(timer);
-            externalSignal?.removeEventListener("abort", onAbort);
-        }
-    }
-    return null;
+    const fetched = await fetchFollowingRedirects(rawUrl, timeoutMs, maxRedirects, externalSignal, HTML_BODY);
+    return fetched?.page.body === undefined ? null : {url: fetched.url, html: fetched.page.body};
 }
 
-/** {@link fetchHtml} that answers null when the page cannot be reached too. */
-export function safeFetchHtml(
-    rawUrl: string,
-    timeoutMs: number,
-    maxRedirects = 5,
-    externalSignal?: AbortSignal,
-): Promise<{url: string; html: string} | null> {
-    return fetchHtml(rawUrl, timeoutMs, maxRedirects, externalSignal).catch(() => null);
+/**
+ * A site's robots.txt, read the way RFC 9309 tells a crawler to: `found` with its text; `absent` when there is none
+ * to obey (4xx, not a text file, too many redirects), so everything may be crawled; `unreachable` when the server
+ * failed (5xx) or could not be reached, so nothing may be.
+ */
+export type RobotsTxt = {state: "found"; text: string} | {state: "absent"} | {state: "unreachable"};
+
+export async function fetchRobotsTxt(origin: string, timeoutMs: number, externalSignal?: AbortSignal): Promise<RobotsTxt> {
+    let fetched: Awaited<ReturnType<typeof fetchFollowingRedirects>>;
+    try {
+        fetched = await fetchFollowingRedirects(new URL("/robots.txt", origin).toString(), timeoutMs, 5, externalSignal, TEXT_BODY);
+    } catch {
+        return {state: "unreachable"};
+    }
+    if (!fetched) return {state: "absent"};
+    if (fetched.page.status >= 500) return {state: "unreachable"};
+    return fetched.page.body === undefined ? {state: "absent"} : {state: "found", text: fetched.page.body};
 }

@@ -57,6 +57,11 @@ export interface ICampaign
     parsedJob?: ParsedJob;
     stats: ICampaignStats;
     lastError?: string;
+    /**
+     * Who runs or sends the campaign right now, and until when (TD-B128). The holder renews it while it works, so a
+     * slow but live worker keeps it; only an expired lease lets the stuck-campaign cron or another process take over.
+     */
+    lease?: {holder: string; until: Date};
 }
 
 const CampaignSchema = new Schema<ICampaign>(
@@ -121,6 +126,10 @@ const CampaignSchema = new Schema<ICampaign>(
             failed: {type: SchemaTypes.Number, default: 0},
         },
         lastError: {type: SchemaTypes.String, required: false},
+        lease: {
+            holder: {type: SchemaTypes.String, required: false},
+            until: {type: SchemaTypes.Date, required: false},
+        },
     },
     {accessMode: "loose"},
 );
@@ -143,6 +152,7 @@ validateSchemaDefAgainstMongoose(CampaignSchema, CampaignSchemaDef, "SwissOutrea
     "parsedJob",
     "stats",
     "lastError",
+    "lease",
 ]);
 
 export type {Types};

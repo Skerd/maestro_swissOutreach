@@ -2,10 +2,14 @@ import {BaseCrudService} from "@coreModule/database/services/baseCrudService";
 import type {ObjectId} from "mongodb";
 import type {ClientSession} from "mongoose";
 import type {ICompany} from "@coreModule/database/schemas/company/company";
+import type {OutreachEmailErrorCode} from "armonia/src/modules/swissOutreach/types/constants";
 import SuppressedContact, {ISuppressedContact} from "./suppressedContact";
 
-/** Why an email to a listed address was skipped, kept in its `lastError` (approval and the send loop both check). */
-export const DO_NOT_CONTACT_SKIP_REASON = "The recipient is on the do-not-contact list.";
+/**
+ * Why an email to a listed address was skipped, kept in its `lastError` (approval and the send loop both check). A
+ * code, so the panel shows it in the reader's language (D126).
+ */
+export const DO_NOT_CONTACT_SKIP_REASON: OutreachEmailErrorCode = "do_not_contact";
 
 /** The domain part of an address, lower-cased (`""` when it has none). */
 export function emailDomain(address: string): string {

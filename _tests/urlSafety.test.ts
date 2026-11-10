@@ -7,8 +7,9 @@ import {
     assertSafePublicHttpUrl,
     isBlockedIp,
     publicOnlyLookup,
+    fetchHtml,
+    fetchRobotsTxt,
     readCapped,
-    safeFetchHtml,
 } from "@swissOutreachModule/utilities/adapters/urlSafety";
 
 /** Makes the resolver answer each list in turn (`{all: true}` lookups), the last one from then on. */
@@ -99,8 +100,27 @@ describe("the resolver the crawler connects with", () => {
             // Public to the check, loopback to the connect
             const lookups = resolveTo([{address: "93.184.216.34", family: 4}], [{address: "127.0.0.1", family: 4}]);
 
-            expect(await safeFetchHtml(`http://rebind.example.ch:${port}/`, 2000)).toBeNull();
+            await expect(fetchHtml(`http://rebind.example.ch:${port}/`, 2000)).rejects.toThrow();
             expect(lookups).toHaveBeenCalledTimes(2);
+            expect(hits).toEqual([]);
+        } finally {
+            server.close();
+        }
+    });
+
+    // TD-B127: a robots.txt that cannot be reached means nothing of the site may be crawled (RFC 9309).
+    it("reports a robots.txt it may not connect to as unreachable", async () => {
+        const hits: string[] = [];
+        const server = http.createServer((req, res) => {
+            hits.push(req.url ?? "");
+            res.writeHead(200, {"content-type": "text/plain"}).end("User-agent: *\nAllow: /");
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        try {
+            const {port} = server.address() as AddressInfo;
+            resolveTo([{address: "93.184.216.34", family: 4}], [{address: "127.0.0.1", family: 4}]);
+
+            expect(await fetchRobotsTxt(`http://rebind.example.ch:${port}`, 2000)).toEqual({state: "unreachable"});
             expect(hits).toEqual([]);
         } finally {
             server.close();

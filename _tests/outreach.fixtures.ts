@@ -35,11 +35,10 @@ export function fakePorts(overrides: Partial<OrchestratorDeps> = {}): Orchestrat
             crawl: async () => PLUMBER_CRAWL,
         },
         llm: {
-            async completeJson<T>(system: string): Promise<T> {
-                const answer = system === JOB_PARSE_SYSTEM_PROMPT
+            async completeJson(system: string): Promise<unknown> {
+                return system === JOB_PARSE_SYSTEM_PROMPT
                     ? {industry: "Plumbing", keywords: ["plumbing", "Sanitär"], germanEquivalents: ["Badrenovation"]}
                     : {subject: "Anfrage Offerte", body: "Guten Tag"};
-                return answer as T;
             },
             completeText: async () => "A Swiss company.",
         },
@@ -61,7 +60,7 @@ export const createPortsMock = {
             crawl: (url, signal) => testPorts.current.website.crawl(url, signal),
         },
         llm: {
-            completeJson: <T>(system: string, user: string) => testPorts.current.llm.completeJson<T>(system, user),
+            completeJson: (system: string, user: string) => testPorts.current.llm.completeJson(system, user),
             completeText: (system, user) => testPorts.current.llm.completeText(system, user),
         },
         mail: {send: (request) => testPorts.current.mail.send(request)},

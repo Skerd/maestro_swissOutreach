@@ -1,8 +1,8 @@
 /**
  * Prospect companies discovered by the outreach pipeline.
  *
- * GENERATED from the live database — regenerate with tools/genSwissOutreach.js rather
- * than hand-editing. Every company here is **invented**: the live rows were real Swiss
+ * Taken once from a development database and maintained by hand since (the generator was never part of the repo).
+ * Every company here is **invented**: the live rows were real Swiss
  * register entries, so names, UIDs and register URLs were replaced while the pipeline
  * shape (scores, reasons, statuses, campaign linkage) was kept.
  */

@@ -1,8 +1,8 @@
 /**
  * Swiss outreach campaigns.
  *
- * GENERATED from the live database — regenerate with tools/genSwissOutreach.js rather
- * than hand-editing. Sender identity is the `Test Company` placeholder throughout.
+ * Taken once from a development database and maintained by hand since (the generator was never part of the repo).
+ * Sender identity is the `Test Company` placeholder throughout.
  */
 import type {CampaignSeedRow} from "./types";
 

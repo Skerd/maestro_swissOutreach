@@ -63,7 +63,8 @@ export const outreachEmailSheetView: ViewConfig = {
                             render: "#DisplayCard",
                             dependent: "lastError",
                             permissions: {read: "lastError"},
-                            field: {name: "lastError", widget: "#DisplayCard", label: "lastError", widgetProps: {icon: "#AlertTriangle"}},
+                            // A known reason is a code (D126); a provider's error has no key and shows as stored
+                            field: {name: "lastError", widget: "#DisplayCard", label: "lastError", widgetProps: {icon: "#AlertTriangle", languageKeyCategory: "lastErrorReasons"}},
                         },
                     ],
                 },

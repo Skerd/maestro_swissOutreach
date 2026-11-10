@@ -10,8 +10,10 @@ import Campaign from "@swissOutreachModule/database/schemas/campaign/campaign";
 import ProspectCompany from "@swissOutreachModule/database/schemas/prospectCompany/prospectCompany";
 import OutreachEmail from "@swissOutreachModule/database/schemas/outreachEmail/outreachEmail";
 import PipelineRunLog from "@swissOutreachModule/database/schemas/pipelineRunLog/pipelineRunLog";
+import AuditLog from "@coreModule/database/schemas/auditLog/auditLog";
 import {CampaignOrchestrator, campaignOrchestrator} from "@swissOutreachModule/utilities/pipeline/campaignOrchestrator";
 import {retryStuckSwissOutreachCampaigns} from "@swissOutreachModule/utilities/cron/retryStuckCampaigns";
+import {campaignService} from "@swissOutreachModule/database/schemas/campaign/campaign.service";
 import type {CrawlResult, MailSendRequest, MailSendResult} from "@swissOutreachModule/utilities/ports";
 import {createCampaign, fakePorts, NO_WEBSITE, PLUMBER, PLUMBER_CRAWL, seedReview} from "./outreach.fixtures";
 import {OUTREACH_OPT_OUT_LINES} from "armonia/src/modules/swissOutreach/prompts/outreachPrompts";
@@ -92,6 +94,8 @@ describe("campaign pipeline", {timeout: 30000}, () => {
         const empty = await ProspectCompany.findOne({uid: NO_WEBSITE.uid});
         await OutreachEmail.updateOne({prospectCompanyId: empty!._id}, {$set: {subject: "Old draft"}});
 
+        // A deliberate restart (start, the stuck-run cron) claims the campaign into `parsing` before it runs
+        await campaignService.claimRun(campaign._id.toString(), ["awaiting_approval"]);
         await new CampaignOrchestrator(fakePorts()).run(campaign._id.toString());
 
         expect(await OutreachEmail.countDocuments({campaignId: campaign._id})).toBe(2);
@@ -148,6 +152,17 @@ describe("campaign pipeline", {timeout: 30000}, () => {
         await new CampaignOrchestrator(fakePorts({registry: {search: async () => { throw new Error("ZEFIX unavailable"); }}})).run(campaign._id.toString());
         expect(await Campaign.findById(campaign._id)).toMatchObject({status: "failed", lastError: "ZEFIX unavailable"});
         expect(await PipelineRunLog.countDocuments({campaignId: campaign._id, level: "error"})).toBe(1);
+    }));
+
+    it("does not re-run a campaign awaiting approval when a late run event is redelivered (TD-B169)", () => asCompany(async () => {
+        const search = vi.fn(async () => [PLUMBER]);
+        const {campaign, emails} = await seedReview(companyId, [{status: "edited", toEmail: "info@one.ch"}], {status: "awaiting_approval"});
+
+        await new CampaignOrchestrator(fakePorts({registry: {search}})).run(campaign._id.toString());
+
+        expect(search).not.toHaveBeenCalled();
+        expect((await Campaign.findById(campaign._id))!.status).toBe("awaiting_approval");
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("edited");
     }));
 
     it("does not run a cancelled campaign or another company's campaign", async () => {
@@ -359,3 +374,83 @@ describe("stuck campaign cron", {timeout: 30000}, () => {
         expect(enqueueSend).toHaveBeenCalledTimes(1);
     }));
 });
+
+describe("campaign lease (TD-B128)", {timeout: 30000}, () => {
+    const longAgo = () => new Date(Date.now() - 20 * 60 * 1000);
+    /** A lease that runs out after 300 ms unless renewed, renewed every 50 ms. */
+    const QUICK_LEASE = {leaseMs: 300, renewEveryMs: 50};
+
+    it("a live sender stalled on one email keeps renewing its lease, and a second sender is refused", () => asCompany(async () => {
+        let release!: () => void;
+        const hung = new Promise<void>((resolve) => { release = resolve; });
+        const send = vi.fn(async (_request: MailSendRequest): Promise<MailSendResult> => {
+            await hung;
+            return {accepted: true, messageId: "<real@smtp.test>"};
+        });
+        const {campaign, emails} = await seedReview(companyId, [{status: "approved", toEmail: "a@one.ch"}], {status: "sending"});
+        const campaignId = campaign._id.toString();
+
+        const sending = new CampaignOrchestrator(fakePorts({mail: {send}}), QUICK_LEASE).sendApproved(campaignId);
+        await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+        const first = (await Campaign.findById(campaignId))!.lease!;
+
+        // Longer than the lease lasts: only renewals keep it
+        await new Promise((resolve) => setTimeout(resolve, 2 * QUICK_LEASE.leaseMs));
+        const renewed = (await Campaign.findById(campaignId))!.lease!;
+        expect(renewed.holder).toBe(first.holder);
+        expect(renewed.until.getTime()).toBeGreaterThan(Date.now());
+
+        // Another process given the same send (a redelivered event) finds the campaign held
+        const twin = accepted();
+        expect(await new CampaignOrchestrator(fakePorts({mail: {send: twin}}), QUICK_LEASE).sendApproved(campaignId)).toEqual({sent: 0, failed: 0});
+        expect(twin).not.toHaveBeenCalled();
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("queued");
+
+        release();
+        expect(await sending).toEqual({sent: 1, failed: 0});
+        const done = await Campaign.findById(campaignId);
+        expect(done!.status).toBe("completed");
+        expect(done!.lease?.holder).toBeUndefined();
+        // TD-B126: the transport's own id is stored
+        expect((await OutreachEmail.findById(emails[0]._id))!.messageId).toBe("<real@smtp.test>");
+        // TD-B144: the per-email stats increments and the lease renewals are machine writes, not audit entries
+        expect(await AuditLog.countDocuments({documentId: campaign._id, action: "CREATE"})).toBe(1);
+        expect(await AuditLog.countDocuments({documentId: campaign._id, action: "UPDATE"})).toBe(0);
+    }));
+
+    it("the cron leaves a campaign with a live lease alone, however long since its last write, and takes it once the lease ran out", () => asCompany(async () => {
+        const enqueueSend = vi.spyOn(campaignOrchestrator, "enqueueSend").mockImplementation(() => undefined);
+        const enqueue = vi.spyOn(campaignOrchestrator, "enqueue").mockImplementation(() => undefined);
+        const {campaign, emails} = await seedReview(companyId, [{status: "queued", toEmail: "a@one.ch"}], {status: "sending"});
+        const enriching = await createCampaign(companyId, {status: "enriching"});
+        const liveLease = {holder: "other-process", until: new Date(Date.now() + 5 * 60 * 1000)};
+        await Campaign.collection.updateMany({_id: {$in: [campaign._id, enriching._id]}}, {$set: {updatedAt: longAgo(), lease: liveLease}});
+        await OutreachEmail.collection.updateMany({_id: emails[0]._id}, {$set: {updatedAt: longAgo()}});
+
+        await retryStuckSwissOutreachCampaigns(companyId);
+
+        expect(enqueueSend).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+        // The live sender still has it in hand
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("queued");
+
+        await Campaign.collection.updateMany({_id: {$in: [campaign._id, enriching._id]}}, {$set: {"lease.until": new Date(Date.now() - 1000)}});
+        await retryStuckSwissOutreachCampaigns(companyId);
+
+        expect(enqueueSend).toHaveBeenCalledWith(campaign._id.toString(), companyId.toString());
+        expect(enqueue).toHaveBeenCalledWith(enriching._id.toString(), companyId.toString());
+        expect((await OutreachEmail.findById(emails[0]._id))!.status).toBe("approved");
+    }));
+
+    it("a run given to a second worker while the first holds the campaign does nothing", () => asCompany(async () => {
+        const search = vi.fn(async () => [PLUMBER]);
+        const campaign = await createCampaign(companyId, {status: "parsing"});
+        await Campaign.collection.updateOne({_id: campaign._id}, {$set: {lease: {holder: "other-process", until: new Date(Date.now() + 60_000)}}});
+
+        await new CampaignOrchestrator(fakePorts({registry: {search}}), QUICK_LEASE).run(campaign._id.toString());
+
+        expect(search).not.toHaveBeenCalled();
+        expect((await Campaign.findById(campaign._id))!).toMatchObject({status: "parsing", lease: {holder: "other-process"}});
+    }));
+});
+

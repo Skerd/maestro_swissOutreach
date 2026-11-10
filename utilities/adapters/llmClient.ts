@@ -8,7 +8,8 @@ const logger = getLogger("swissOutreach.llm");
 /** The LLM failing again and again (down, overloaded) fails the next calls fast; callers fall back to heuristics (BE-09). */
 export const llmCircuitBreaker = new CircuitBreaker({name: "swissOutreach.llm", logger});
 
-function extractJsonObject(text: string): any {
+/** The JSON in a model's answer: the whole text, or the first `{…}` in it. Unknown until the caller checks its shape. */
+function extractJsonObject(text: string): unknown {
     const trimmed = text.trim();
     try {
         return JSON.parse(trimmed);
@@ -20,9 +21,9 @@ function extractJsonObject(text: string): any {
 }
 
 export class OpenAiCompatibleLlm implements LlmPort {
-    async completeJson<T>(system: string, user: string): Promise<T> {
+    async completeJson(system: string, user: string): Promise<unknown> {
         const text = await this.completeText(system, `${user}\n\nRespond with JSON only.`);
-        return extractJsonObject(text) as T;
+        return extractJsonObject(text);
     }
 
     async completeText(system: string, user: string): Promise<string> {
@@ -67,10 +68,10 @@ export class OpenAiCompatibleLlm implements LlmPort {
             signal,
         });
         if (!response.ok) throw new Error(`OpenAI-compatible LLM HTTP ${response.status}`);
-        const json = await response.json();
+        const json: {choices?: Array<{message?: {content?: unknown}}>} | null = await response.json();
         const content = json?.choices?.[0]?.message?.content;
-        if (!content) throw new Error("Empty LLM content");
-        return String(content);
+        if (typeof content !== "string" || !content) throw new Error("Empty LLM content");
+        return content;
     }
 
     private async callOllama(system: string, user: string, signal: AbortSignal): Promise<string> {
@@ -91,10 +92,10 @@ export class OpenAiCompatibleLlm implements LlmPort {
             signal,
         });
         if (!response.ok) throw new Error(`Ollama HTTP ${response.status}`);
-        const json = await response.json();
+        const json: {message?: {content?: unknown}} | null = await response.json();
         const content = json?.message?.content;
-        if (!content) throw new Error("Empty Ollama content");
-        return String(content);
+        if (typeof content !== "string" || !content) throw new Error("Empty Ollama content");
+        return content;
     }
 }
 

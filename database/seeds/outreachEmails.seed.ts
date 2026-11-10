@@ -1,9 +1,8 @@
 /**
  * Draft outreach e-mails, one per prospect.
  *
- * GENERATED from the live database — regenerate with tools/genSwissOutreach.js rather
- * than hand-editing. Bodies were re-written to match the synthetic company names and
- * the placeholder sender.
+ * Taken once from a development database and maintained by hand since (the generator was never part of the repo).
+ * Bodies were re-written to match the synthetic company names and the placeholder sender.
  */
 import type {OutreachEmailSeedRow} from "./types";
 

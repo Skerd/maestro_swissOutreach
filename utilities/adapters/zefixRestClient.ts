@@ -48,21 +48,79 @@ function formatUid(uid?: string, uidFormatted?: string): string | undefined {
     return `CHE-${m[1]}.${m[2]}.${m[3]}`;
 }
 
-function mapFirmHit(raw: any): RegistryCompany | null {
-    const name = typeof raw?.name === "string" ? raw.name : raw?.companyName;
+/** The fields of a ZEFIX hit (public `firm/search`, authenticated `company/search`) the client reads; any may be missing. */
+type ZefixHit = {
+    name?: unknown;
+    companyName?: unknown;
+    uid?: unknown;
+    uidFormatted?: unknown;
+    uidOrganisationId?: unknown;
+    legalFormId?: unknown;
+    legalForm?: unknown;
+    canton?: unknown;
+    legalSeat?: unknown;
+    cantonalExcerptWeb?: unknown;
+    ehraid?: unknown;
+    zefixDetailWeb?: unknown;
+    detailWeb?: unknown;
+    ehraIdWeb?: unknown;
+};
+
+const textOf = (value: unknown): string | undefined => (typeof value === "string" && value ? value : undefined);
+
+const isObject = (value: unknown): value is object => typeof value === "object" && value !== null;
+
+/** A name ZEFIX gives as text or per language (`{de, fr, it, en}`), German first. */
+function nameOf(value: unknown): string | undefined {
+    if (!isObject(value)) return textOf(value);
+    const names: {de?: unknown; fr?: unknown; it?: unknown; en?: unknown} = value;
+    return textOf(names.de) ?? textOf(names.fr) ?? textOf(names.it) ?? textOf(names.en);
+}
+
+/** A legal form given as text, or as an object with a (per-language) `name`. */
+function legalFormOf(value: unknown): string | undefined {
+    if (!isObject(value)) return textOf(value);
+    const form: {name?: unknown} = value;
+    return nameOf(form.name);
+}
+
+/** The hits of a ZEFIX answer: the answer itself when it is a list, else its `list` (or `companies`, `data`). */
+function hitsOf(answer: unknown): ZefixHit[] {
+    let list: unknown = answer;
+    if (!Array.isArray(answer) && isObject(answer)) {
+        const wrapped: {list?: unknown; companies?: unknown; data?: unknown} = answer;
+        list = wrapped.list ?? wrapped.companies ?? wrapped.data;
+    }
+    return Array.isArray(list) ? list.filter(isObject) : [];
+}
+
+function mapFirmHit(raw: ZefixHit): RegistryCompany | null {
+    const name = textOf(raw.name) ?? textOf(raw.companyName);
     if (!name) return null;
-    const uid = formatUid(raw.uid, raw.uidFormatted);
-    const legalFormId = Number(raw.legalFormId);
+    const ehraid = typeof raw.ehraid === "number" ? String(raw.ehraid) : textOf(raw.ehraid);
     return {
-        companyName: String(name),
-        uid,
-        canton: raw.canton || undefined,
-        legalForm: LEGAL_FORM_BY_ID[legalFormId] || (raw.legalForm?.name?.de || raw.legalForm?.name) || undefined,
-        registerUrl:
-            raw.cantonalExcerptWeb ||
-            (raw.ehraid ? `https://www.zefix.ch/en/search/entity/list/firm/${raw.ehraid}` : undefined),
+        companyName: name,
+        uid: formatUid(textOf(raw.uid), textOf(raw.uidFormatted)),
+        canton: textOf(raw.canton),
+        legalForm: LEGAL_FORM_BY_ID[Number(raw.legalFormId)] || legalFormOf(raw.legalForm),
+        registerUrl: textOf(raw.cantonalExcerptWeb) ?? (ehraid ? `https://www.zefix.ch/en/search/entity/list/firm/${ehraid}` : undefined),
     };
 }
+
+function mapCompanyHit(raw: ZefixHit): RegistryCompany | null {
+    const name = nameOf(raw.name);
+    if (!name) return null;
+    const seat: {canton?: unknown} = isObject(raw.legalSeat) ? raw.legalSeat : {};
+    return {
+        companyName: name,
+        uid: textOf(raw.uid) ?? textOf(raw.uidOrganisationId),
+        canton: textOf(raw.canton) ?? textOf(seat.canton),
+        legalForm: legalFormOf(raw.legalForm),
+        registerUrl: textOf(raw.zefixDetailWeb) ?? textOf(raw.detailWeb) ?? textOf(raw.ehraIdWeb),
+    };
+}
+
+const isCompany = (company: RegistryCompany | null): company is RegistryCompany => company !== null;
 
 /**
  * Live ZEFIX client using the same public API as https://www.zefix.ch
@@ -148,9 +206,8 @@ export class ZefixRestClient implements CompanyRegistryPort {
                     const text = await response.text().catch(() => "");
                     throw new Error(`ZEFIX firm/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
                 }
-                const json = await response.json();
-                const list = Array.isArray(json) ? json : json?.list || [];
-                return (list as any[]).map(mapFirmHit).filter(Boolean) as RegistryCompany[];
+                const answer: unknown = await response.json();
+                return hitsOf(answer).map(mapFirmHit).filter(isCompany);
             } finally {
                 clearTimeout(timer);
             }
@@ -192,24 +249,8 @@ export class ZefixRestClient implements CompanyRegistryPort {
                     const text = await response.text().catch(() => "");
                     throw new Error(`ZEFIX company/search HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
                 }
-                const json = await response.json();
-                const list = Array.isArray(json) ? json : json?.list || json?.companies || json?.data || [];
-                return (list as any[])
-                    .map((raw) => {
-                        const name =
-                            typeof raw?.name === "string"
-                                ? raw.name
-                                : raw?.name?.de || raw?.name?.fr || raw?.name?.it || raw?.name?.en;
-                        if (!name) return null;
-                        return {
-                            companyName: String(name),
-                            uid: raw.uid || raw.uidOrganisationId,
-                            canton: raw.canton || raw.legalSeat?.canton,
-                            legalForm: raw.legalForm?.name?.de || raw.legalForm?.name || raw.legalForm,
-                            registerUrl: raw.zefixDetailWeb || raw.detailWeb || raw.ehraIdWeb,
-                        } as RegistryCompany;
-                    })
-                    .filter(Boolean) as RegistryCompany[];
+                const answer: unknown = await response.json();
+                return hitsOf(answer).map(mapCompanyHit).filter(isCompany);
             } finally {
                 clearTimeout(timer);
             }

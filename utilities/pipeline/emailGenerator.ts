@@ -59,12 +59,10 @@ export async function generateOutreachEmail(
     },
 ): Promise<{subject: string; body: string}> {
     try {
-        const result = await llm.completeJson<{subject: string; body: string}>(
-            EMAIL_COMPOSE_SYSTEM_PROMPT,
-            buildEmailComposeUserPrompt(input),
-        );
-        if (result?.subject && result?.body) {
-            return {subject: result.subject.slice(0, 300), body: withOptOut(result.body, input.language)};
+        const answer = await llm.completeJson(EMAIL_COMPOSE_SYSTEM_PROMPT, buildEmailComposeUserPrompt(input));
+        const draft: {subject?: unknown; body?: unknown} = typeof answer === "object" && answer !== null ? answer : {};
+        if (typeof draft.subject === "string" && draft.subject && typeof draft.body === "string" && draft.body) {
+            return {subject: draft.subject.slice(0, 300), body: withOptOut(draft.body, input.language)};
         }
     } catch (err) {
         logger.warn(`Email LLM failed, using template: ${err instanceof Error ? err.message : String(err)}`);

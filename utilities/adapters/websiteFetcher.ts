@@ -11,7 +11,13 @@ import {
     scoreWebsiteCandidate,
     stripHtml,
 } from "@swissOutreachModule/utilities/adapters/contactExtractor";
-import {assertSafePublicHttpUrl, fetchHtml, safeFetchHtml} from "@swissOutreachModule/utilities/adapters/urlSafety";
+import {
+    assertSafePublicHttpUrl,
+    CRAWLER_PRODUCT_TOKEN,
+    fetchHtml,
+    fetchRobotsTxt,
+} from "@swissOutreachModule/utilities/adapters/urlSafety";
+import {isPathAllowed, robotsRulesFor} from "@swissOutreachModule/utilities/adapters/robotsTxt";
 import {CampaignCancelledError} from "@swissOutreachModule/utilities/pipeline/cancellation";
 
 const logger = getLogger("swissOutreach.crawler");
@@ -26,31 +32,16 @@ function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function isAllowedByRobots(origin: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
-    try {
-        const robotsUrl = new URL("/robots.txt", origin).toString();
-        const fetched = await safeFetchHtml(robotsUrl, timeoutMs, 3, signal);
-        if (!fetched?.html) return true;
-        const lines = fetched.html.split(/\r?\n/);
-        let inStar = false;
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (/^user-agent:\s*\*/i.test(trimmed)) {
-                inStar = true;
-                continue;
-            }
-            if (/^user-agent:/i.test(trimmed)) {
-                inStar = false;
-                continue;
-            }
-            if (inStar && /^disallow:\s*\/\s*$/i.test(trimmed)) {
-                return false;
-            }
-        }
-        return true;
-    } catch {
-        return true;
+/** The contact pages the site's robots.txt lets the crawler read; none when robots.txt could not be reached. */
+async function pathsAllowedByRobots(origin: string, timeoutMs: number, signal?: AbortSignal): Promise<string[]> {
+    const robots = await fetchRobotsTxt(origin, timeoutMs, signal);
+    if (signal?.aborted) {
+        throw new CampaignCancelledError("crawl");
     }
+    if (robots.state === "unreachable") return [];
+    if (robots.state === "absent") return CONTACT_PATHS;
+    const rules = robotsRulesFor(robots.text, CRAWLER_PRODUCT_TOKEN);
+    return CONTACT_PATHS.filter((path) => isPathAllowed(rules, path));
 }
 
 export class HttpWebsiteFetcher implements WebsiteFetchPort {
@@ -85,14 +76,14 @@ export class HttpWebsiteFetcher implements WebsiteFetchPort {
             return {pages: [], emails: [], phones: [], languages: [], services: [], textBlob: ""};
         }
 
-        const allowed = await isAllowedByRobots(origin, config.requestTimeoutMs, signal);
-        if (!allowed) {
-            logger.info(`robots.txt disallows crawl for ${origin}`);
+        const allowedPaths = await pathsAllowedByRobots(origin, config.requestTimeoutMs, signal);
+        if (allowedPaths.length === 0) {
+            logger.info(`robots.txt disallows the crawl of ${origin}, or could not be reached`);
             return {pages: [], emails: [], phones: [], languages: [], services: [], textBlob: ""};
         }
 
         const pages: {url: string; html: string}[] = [];
-        const depth = Math.min(CONTACT_PATHS.length, Math.max(1, config.searchDepth + 2));
+        const depth = Math.min(allowedPaths.length, Math.max(1, config.searchDepth + 2));
         // A site that is down or timing out is not asked for its remaining pages, each waiting out the timeout (BE-09).
         const site = new CircuitBreaker({
             name: `swissOutreach.site ${origin}`,
@@ -101,7 +92,7 @@ export class HttpWebsiteFetcher implements WebsiteFetchPort {
             resetTimeout: SITE_BREAKER_SPAN_MS,
             logger,
         });
-        for (const path of CONTACT_PATHS.slice(0, depth)) {
+        for (const path of allowedPaths.slice(0, depth)) {
             if (signal?.aborted) {
                 throw new CampaignCancelledError("crawl");
             }

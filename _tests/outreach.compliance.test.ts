@@ -180,7 +180,8 @@ describe("sending with email turned off", {timeout: 30000}, () => {
             const stored = (await OutreachEmail.findById(emails[0]._id))!;
             expect(stored.status).toBe("failed");
             expect(stored.messageId).toBeUndefined();
-            expect(stored.lastError).toContain("turned off");
+            // Stored as the reason code, which the panel translates (D126)
+            expect(stored.lastError).toBe("mail_disabled");
             expect((await Campaign.findById(campaign._id))!.status).toBe("failed");
         } finally {
             EMAIL.ENABLED = enabled;

@@ -9,8 +9,8 @@
  *  - Dates are ISO strings; `createdAt` / `updatedAt` are not exported (injected at
  *    seed time).
  *
- * Every prospect company in these seeds is **invented**. The live rows were real Swiss
- * register entries; see `tools/genSwissOutreach.js` in the seed-handoff bundle.
+ * Every prospect company in these seeds is **invented**: the rows they came from were real Swiss
+ * register entries, so names, UIDs and register URLs were replaced.
  */
 
 import type {SwissCantonCode} from "armonia/src/modules/swissOutreach/types/constants";
