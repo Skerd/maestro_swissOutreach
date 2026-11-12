@@ -76,7 +76,7 @@ const CampaignSchema = new Schema<ICampaign>(
         jobDescription: {
             type: SchemaTypes.String,
             required: true,
-            dynamicTableConfiguration: {filterable: true, sortable: false, cellType: COLUMN_TYPE.STRING},
+            dynamicTableConfiguration: {filterable: true, sortable: false, cellType: COLUMN_TYPE.STRING, visible: false},
         },
         country: {
             type: SchemaTypes.String,
@@ -103,13 +103,13 @@ const CampaignSchema = new Schema<ICampaign>(
             required: true,
             enum: emailToneValues,
         },
-        sendAutomatically: {type: SchemaTypes.Boolean, default: false},
-        senderCompanyName: {type: SchemaTypes.String, required: true, trim: true},
-        senderName: {type: SchemaTypes.String, required: true, trim: true},
-        senderEmail: {type: SchemaTypes.String, required: true, trim: true},
-        senderPhone: {type: SchemaTypes.String, required: false},
-        senderWebsite: {type: SchemaTypes.String, required: false},
-        additionalNotes: {type: SchemaTypes.String, required: false},
+        sendAutomatically: {type: SchemaTypes.Boolean, default: false, dynamicTableConfiguration: {visible: false}},
+        senderCompanyName: {type: SchemaTypes.String, required: true, trim: true, dynamicTableConfiguration: {visible: false}},
+        senderName: {type: SchemaTypes.String, required: true, trim: true, dynamicTableConfiguration: {visible: false}},
+        senderEmail: {type: SchemaTypes.String, required: true, trim: true, dynamicTableConfiguration: {visible: false}},
+        senderPhone: {type: SchemaTypes.String, required: false, dynamicTableConfiguration: {visible: false}},
+        senderWebsite: {type: SchemaTypes.String, required: false, dynamicTableConfiguration: {visible: false}},
+        additionalNotes: {type: SchemaTypes.String, required: false, dynamicTableConfiguration: {visible: false}},
         status: {
             type: SchemaTypes.String,
             enum: campaignStatusValues,
@@ -125,7 +125,7 @@ const CampaignSchema = new Schema<ICampaign>(
             sent: {type: SchemaTypes.Number, default: 0},
             failed: {type: SchemaTypes.Number, default: 0},
         },
-        lastError: {type: SchemaTypes.String, required: false},
+        lastError: {type: SchemaTypes.String, required: false, dynamicTableConfiguration: {visible: false}},
         lease: {
             holder: {type: SchemaTypes.String, required: false},
             until: {type: SchemaTypes.Date, required: false},

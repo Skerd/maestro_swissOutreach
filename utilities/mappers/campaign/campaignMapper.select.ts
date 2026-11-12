@@ -5,7 +5,8 @@ import {campaignName} from "@swissOutreachModule/utilities/mappers/campaign/camp
 export function campaignToSelect(campaign: ICampaign): ApiSelectDatum {
     return {
         value: campaign._id.toString(),
-        label: `${campaignName(campaign)} (${campaign.status})`,
+        // The name only: the raw status code is not a label (UX-09), and the campaign pages show the translated status.
+        label: campaignName(campaign),
     };
 }
 
