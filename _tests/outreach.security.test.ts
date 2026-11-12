@@ -177,7 +177,7 @@ describe("a campaign's name", {timeout: 30000}, () => {
         await createCampaign(companyId);
         const response = await call("post", "campaign/select", {page: 1, limit: 20, name: "roof"});
         expect(response.status).toBe(200);
-        expect(response.body.data.map((option: {label: string}) => option.label)).toEqual(["Roof repair, Basel (draft)"]);
+        expect(response.body.data.map((option: {label: string}) => option.label)).toEqual(["Roof repair, Basel"]);
     }));
 
     it("of a campaign made before campaigns had one is its sender company", () => asCompany(async () => {
